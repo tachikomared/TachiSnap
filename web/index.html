@@ -3,919 +3,1643 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Pixel Snapper — Fix AI Pixel Art</title>
+<title>TachiPixels — AI Pixel Art Pipeline</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"></script>
 <style>
   :root {
-    --bg:        #0a0a0f;
-    --surface:   #12121a;
-    --card:      #1a1a26;
-    --border:    #2a2a3d;
-    --accent:    #7c3aed;
-    --accent2:   #06b6d4;
-    --accent3:   #f59e0b;
-    --text:      #e2e8f0;
-    --muted:     #64748b;
-    --pixel:     #22c55e;
-    --danger:    #ef4444;
-    --radius:    4px;
+    --bg:#0a0a0f; --surface:#12121a; --card:#1a1a26; --border:#2a2a3d;
+    --accent:#7c3aed; --accent2:#06b6d4; --accent3:#f59e0b;
+    --text:#e2e8f0; --muted:#64748b; --pixel:#22c55e; --danger:#ef4444;
+    --radius:4px;
   }
-
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
+  *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
   body {
-    font-family: 'JetBrains Mono', monospace;
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-    overflow-x: hidden;
-    position: relative;
+    font-family:'JetBrains Mono', monospace;
+    background:var(--bg); color:var(--text);
+    min-height:100vh; overflow-x:hidden; position:relative;
   }
-
-  /* Scanline overlay */
   body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background: repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 2px,
-      rgba(0,0,0,0.07) 2px,
-      rgba(0,0,0,0.07) 4px
-    );
-    pointer-events: none;
-    z-index: 9999;
+    content:''; position:fixed; inset:0;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);
+    pointer-events:none; z-index:9999;
   }
-
-  /* Grid bg */
   body::after {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background-image:
-      linear-gradient(rgba(124,58,237,0.05) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(124,58,237,0.05) 1px, transparent 1px);
-    background-size: 32px 32px;
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  .wrapper {
-    position: relative;
-    z-index: 1;
-    max-width: 960px;
-    margin: 0 auto;
-    padding: 0 24px 80px;
-  }
-
-  /* ── HEADER ── */
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 32px 0 48px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 48px;
-  }
-
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .logo-icon {
-    width: 40px;
-    height: 40px;
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    grid-template-rows: repeat(4, 1fr);
-    gap: 2px;
-    animation: logoPulse 4s ease-in-out infinite;
-  }
-
-  .logo-icon span {
-    display: block;
-    border-radius: 1px;
-  }
-
-  @keyframes logoPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.7; }
-  }
-
-  .logo-text {
-    font-family: 'Pixelify Sans', monospace;
-    font-size: 22px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-  }
-
-  .logo-text span {
-    color: var(--accent);
-  }
-
-  .badge {
-    font-size: 10px;
-    padding: 2px 8px;
-    background: rgba(124,58,237,0.2);
-    border: 1px solid rgba(124,58,237,0.4);
-    color: var(--accent);
-    border-radius: 2px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-  }
-
-  /* ── HERO ── */
-  .hero {
-    margin-bottom: 48px;
-  }
-
-  h1 {
-    font-family: 'Pixelify Sans', monospace;
-    font-size: clamp(32px, 6vw, 56px);
-    line-height: 1.1;
-    margin-bottom: 16px;
-  }
-
-  h1 em {
-    font-style: normal;
-    color: var(--accent2);
-  }
-
-  .hero p {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.7;
-    max-width: 480px;
-  }
-
-  /* ── DROP ZONE ── */
-  .drop-zone {
-    border: 2px dashed var(--border);
-    border-radius: var(--radius);
-    padding: 64px 32px;
-    text-align: center;
-    cursor: pointer;
-    transition: border-color 0.2s, background 0.2s;
-    position: relative;
-    overflow: hidden;
-    background: var(--surface);
-  }
-
-  .drop-zone::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: radial-gradient(ellipse at center, rgba(124,58,237,0.08) 0%, transparent 70%);
-    opacity: 0;
-    transition: opacity 0.3s;
-  }
-
-  .drop-zone.over, .drop-zone:hover {
-    border-color: var(--accent);
-  }
-
-  .drop-zone.over::before, .drop-zone:hover::before {
-    opacity: 1;
-  }
-
-  .drop-icon {
-    font-size: 48px;
-    margin-bottom: 16px;
-    display: block;
-    line-height: 1;
-    filter: grayscale(0.3);
-  }
-
-  .drop-label {
-    font-family: 'Pixelify Sans', monospace;
-    font-size: 18px;
-    margin-bottom: 8px;
-    color: var(--text);
-  }
-
-  .drop-sub {
-    font-size: 11px;
-    color: var(--muted);
-    letter-spacing: 0.05em;
-  }
-
-  input[type="file"] { display: none; }
-
-  /* ── CONTROLS ── */
-  .controls {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 16px;
-    margin: 24px 0;
-  }
-
-  @media (max-width: 640px) {
-    .controls { grid-template-columns: 1fr; }
-  }
-
-  .control-group {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 16px;
-  }
-
-  .control-label {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--muted);
-    margin-bottom: 12px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .control-label .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 1px;
-    background: var(--accent);
-    display: inline-block;
-  }
-
-  .control-value {
-    font-family: 'Pixelify Sans', monospace;
-    font-size: 28px;
-    color: var(--accent2);
-    margin-bottom: 8px;
-  }
-
-  input[type="range"] {
-    -webkit-appearance: none;
-    width: 100%;
-    height: 4px;
-    background: var(--border);
-    border-radius: 2px;
-    outline: none;
-  }
-
-  input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 14px;
-    height: 14px;
-    border-radius: 2px;
-    background: var(--accent);
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  input[type="range"]::-webkit-slider-thumb:hover {
-    background: var(--accent2);
-  }
-
-  select {
-    width: 100%;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
-    padding: 8px 10px;
-    border-radius: var(--radius);
-    cursor: pointer;
-    outline: none;
-    margin-top: 4px;
-  }
-
-  select:focus { border-color: var(--accent); }
-
-  /* ── PROCESS BTN ── */
-  .process-btn {
-    width: 100%;
-    padding: 18px;
-    background: var(--accent);
-    border: none;
-    color: #fff;
-    font-family: 'Pixelify Sans', monospace;
-    font-size: 20px;
-    cursor: pointer;
-    border-radius: var(--radius);
-    transition: background 0.15s, transform 0.1s;
-    position: relative;
-    overflow: hidden;
-    letter-spacing: 0.03em;
-  }
-
-  .process-btn::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 50%);
-  }
-
-  .process-btn:hover:not(:disabled) {
-    background: #6d28d9;
-    transform: translateY(-1px);
-  }
-
-  .process-btn:active:not(:disabled) {
-    transform: translateY(0);
-  }
-
-  .process-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  /* ── STATUS ── */
-  .status-bar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    margin: 16px 0;
-    font-size: 11px;
-    min-height: 44px;
-    transition: border-color 0.2s;
-  }
-
-  .status-bar.success { border-color: var(--pixel); }
-  .status-bar.error   { border-color: var(--danger); }
-  .status-bar.loading { border-color: var(--accent2); }
-
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 1px;
-    background: var(--muted);
-    flex-shrink: 0;
-    transition: background 0.2s;
-  }
-  .status-bar.success .status-dot { background: var(--pixel); animation: blink 1s step-end 3; }
-  .status-bar.error   .status-dot { background: var(--danger); }
-  .status-bar.loading .status-dot { background: var(--accent2); animation: spin 0.8s linear infinite; }
-
-  @keyframes blink  { 0%,100%{opacity:1} 50%{opacity:0} }
-  @keyframes spin   { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
-
-  /* ── PREVIEW ── */
-  .preview-section {
-    display: none;
-    margin-top: 40px;
-  }
-
-  .preview-section.visible { display: block; }
-
-  .section-title {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--muted);
-    margin-bottom: 16px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .section-title::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: var(--border);
-  }
-
-  .preview-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-  }
-
-  @media (max-width: 600px) {
-    .preview-grid { grid-template-columns: 1fr; }
-  }
-
-  .preview-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .preview-card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--muted);
-  }
-
-  .tag {
-    padding: 2px 6px;
-    border-radius: 2px;
-    font-size: 9px;
-    font-weight: 600;
-  }
-
-  .tag.before { background: rgba(100,116,139,0.2); color: var(--muted); }
-  .tag.after  { background: rgba(34,197,94,0.15); color: var(--pixel); border: 1px solid rgba(34,197,94,0.3); }
-
-  .preview-img-wrap {
-    background:
-      repeating-conic-gradient(#1e1e2e 0% 25%, #151520 0% 50%) 0 0 / 20px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 200px;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .preview-img-wrap img {
-    max-width: 100%;
-    max-height: 340px;
-    object-fit: contain;
-    image-rendering: pixelated;
-    image-rendering: crisp-edges;
-    display: block;
-  }
-
-  .img-meta {
-    padding: 10px 14px;
-    font-size: 10px;
-    color: var(--muted);
-    border-top: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-  }
-
-  /* ── STATS ── */
-  .stats-row {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-    margin: 16px 0;
-  }
-
-  @media (max-width: 600px) {
-    .stats-row { grid-template-columns: repeat(2, 1fr); }
-  }
-
-  .stat-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 12px 14px;
-  }
-
-  .stat-label {
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--muted);
-    margin-bottom: 4px;
-  }
-
-  .stat-val {
-    font-family: 'Pixelify Sans', monospace;
-    font-size: 22px;
-    color: var(--accent3);
-  }
-
-  /* ── DOWNLOAD BTN ── */
-  .download-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    width: 100%;
-    padding: 14px;
-    background: rgba(34,197,94,0.1);
-    border: 1px solid rgba(34,197,94,0.4);
-    color: var(--pixel);
-    font-family: 'Pixelify Sans', monospace;
-    font-size: 16px;
-    cursor: pointer;
-    border-radius: var(--radius);
-    text-decoration: none;
-    transition: background 0.15s;
-    margin-top: 16px;
-    letter-spacing: 0.03em;
-  }
-
-  .download-btn:hover {
-    background: rgba(34,197,94,0.2);
-  }
-
-  /* ── INFO PILLS ── */
-  .info-row {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin: 24px 0 0;
-  }
-
-  .pill {
-    font-size: 10px;
-    padding: 4px 10px;
-    border-radius: 2px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--muted);
-    letter-spacing: 0.05em;
-  }
-
-  .pill strong {
-    color: var(--text);
-  }
-
-  /* ── FOOTER ── */
-  footer {
-    margin-top: 80px;
-    padding-top: 24px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 11px;
-    color: var(--muted);
-  }
-
-  footer a {
-    color: var(--muted);
-    text-decoration: none;
-    transition: color 0.15s;
-  }
-
-  footer a:hover { color: var(--accent2); }
-
-  /* ── WASM NOT LOADED ── */
-  .wasm-notice {
-    padding: 12px 16px;
-    background: rgba(245,158,11,0.1);
-    border: 1px solid rgba(245,158,11,0.3);
-    border-radius: var(--radius);
-    font-size: 11px;
-    color: var(--accent3);
-    margin-bottom: 16px;
-    display: none;
-  }
-
-  .wasm-notice.visible { display: block; }
-
-  /* loading skeleton */
-  @keyframes shimmer {
-    0%   { background-position: -200% 0; }
-    100% { background-position:  200% 0; }
-  }
-
-  .skeleton {
-    background: linear-gradient(90deg, var(--card) 25%, var(--border) 50%, var(--card) 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.4s infinite;
-    border-radius: var(--radius);
-  }
+    content:''; position:fixed; inset:0;
+    background-image:linear-gradient(rgba(124,58,237,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(124,58,237,.05) 1px,transparent 1px);
+    background-size:32px 32px; pointer-events:none; z-index:0;
+  }
+  .wrapper { position:relative; z-index:1; max-width:1080px; margin:0 auto; padding:0 24px 80px; }
+
+  /* Header */
+  header { display:flex; align-items:center; justify-content:space-between; padding:32px 0 48px; border-bottom:1px solid var(--border); margin-bottom:48px; }
+  .logo { display:flex; align-items:center; gap:12px; }
+  .logo-icon { width:40px; height:40px; display:grid; grid-template-columns:repeat(4,1fr); grid-template-rows:repeat(4,1fr); gap:2px; animation:logoPulse 4s ease-in-out infinite; }
+  .logo-icon span { display:block; border-radius:1px; }
+  @keyframes logoPulse { 0%,100%{opacity:1} 50%{opacity:.7} }
+  .logo-text { font-family:'Pixelify Sans', monospace; font-size:22px; font-weight:700; }
+  .logo-text span { color:var(--accent2); }
+  .badge { font-size:10px; padding:2px 8px; background:rgba(124,58,237,.2); border:1px solid rgba(124,58,237,.4); color:var(--accent); border-radius:2px; letter-spacing:.1em; text-transform:uppercase; }
+
+  /* Hero */
+  .hero { margin-bottom:48px; }
+  h1 { font-family:'Pixelify Sans', monospace; font-size:clamp(32px,6vw,52px); line-height:1.1; margin-bottom:16px; }
+  h1 em { font-style:normal; color:var(--accent2); }
+  .hero p { color:var(--muted); font-size:13px; line-height:1.7; max-width:600px; }
+  kbd { background:var(--surface); border:1px solid var(--border); border-radius:3px; padding:1px 6px; font-family:'JetBrains Mono', monospace; font-size:11px; color:var(--text); }
+
+  /* Drop zone */
+  .drop-zone { border:2px dashed var(--border); border-radius:var(--radius); padding:64px 32px; text-align:center; cursor:pointer; transition:border-color .2s, background .2s; position:relative; overflow:hidden; background:var(--surface); }
+  .drop-zone::before { content:''; position:absolute; inset:0; background:radial-gradient(ellipse at center,rgba(124,58,237,.08) 0%,transparent 70%); opacity:0; transition:opacity .3s; }
+  .drop-zone.over,.drop-zone:hover { border-color:var(--accent); }
+  .drop-zone.over::before,.drop-zone:hover::before { opacity:1; }
+  .drop-icon { font-size:48px; margin-bottom:16px; display:block; line-height:1; }
+  .drop-label { font-family:'Pixelify Sans', monospace; font-size:18px; margin-bottom:8px; }
+  .drop-sub { font-size:11px; color:var(--muted); letter-spacing:.05em; line-height:1.7; }
+  input[type="file"] { display:none; }
+  @keyframes pasteFlash { 0%{ background:rgba(124,58,237,.3); } 100%{ background:var(--surface); } }
+  .drop-zone.pasted { animation:pasteFlash .6s ease-out; }
+
+  /* Controls */
+  .controls { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin:24px 0; }
+  .control-group { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:14px; }
+  .control-label { font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); margin-bottom:10px; display:flex; align-items:center; gap:6px; }
+  .control-label .dot { width:6px; height:6px; border-radius:1px; background:var(--accent); display:inline-block; }
+  .control-value { font-family:'Pixelify Sans', monospace; font-size:22px; color:var(--accent2); margin-bottom:8px; min-height:28px; }
+  input[type="range"] { -webkit-appearance:none; width:100%; height:4px; background:var(--border); border-radius:2px; outline:none; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:2px; background:var(--accent); cursor:pointer; transition:background .15s; }
+  input[type="range"]::-webkit-slider-thumb:hover { background:var(--accent2); }
+  select, input[type="number"] { width:100%; background:var(--surface); border:1px solid var(--border); color:var(--text); font-family:'JetBrains Mono', monospace; font-size:11px; padding:8px 10px; border-radius:var(--radius); cursor:pointer; outline:none; }
+  select:focus, input[type="number"]:focus { border-color:var(--accent); }
+  .control-toggle { display:flex; align-items:center; gap:8px; cursor:pointer; }
+  .control-toggle input { width:auto; cursor:pointer; }
+
+  /* Action bar */
+  .action-bar { display:flex; gap:12px; margin:16px 0; flex-wrap:wrap; }
+  .process-btn { flex:1; min-width:240px; padding:18px; background:var(--accent); border:none; color:#fff; font-family:'Pixelify Sans', monospace; font-size:18px; cursor:pointer; border-radius:var(--radius); transition:background .15s, transform .1s; position:relative; overflow:hidden; letter-spacing:.03em; }
+  .process-btn::after { content:''; position:absolute; inset:0; background:linear-gradient(135deg,rgba(255,255,255,.1) 0%,transparent 50%); }
+  .process-btn:hover:not(:disabled) { background:#6d28d9; transform:translateY(-1px); }
+  .process-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .secondary-btn { padding:18px 22px; background:transparent; border:1px solid var(--border); color:var(--text); font-family:'Pixelify Sans', monospace; font-size:14px; cursor:pointer; border-radius:var(--radius); transition:all .15s; display:flex; align-items:center; gap:6px; }
+  .secondary-btn:hover:not(:disabled) { border-color:var(--accent2); color:var(--accent2); }
+  .secondary-btn:disabled { opacity:.3; cursor:not-allowed; }
+
+  /* Status */
+  .status-bar { display:flex; align-items:center; gap:10px; padding:12px 16px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin:16px 0; font-size:11px; min-height:44px; transition:border-color .2s; }
+  .status-bar.success { border-color:var(--pixel); }
+  .status-bar.error { border-color:var(--danger); }
+  .status-bar.loading { border-color:var(--accent2); }
+  .status-dot { width:8px; height:8px; border-radius:1px; background:var(--muted); flex-shrink:0; }
+  .status-bar.success .status-dot { background:var(--pixel); animation:blink 1s step-end 3; }
+  .status-bar.error .status-dot { background:var(--danger); }
+  .status-bar.loading .status-dot { background:var(--accent2); animation:spin .8s linear infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+  @keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }
+  .progress-bar { flex:1; height:4px; background:var(--border); border-radius:2px; overflow:hidden; margin-left:12px; }
+  .progress-fill { height:100%; background:var(--accent2); transition:width .2s; width:0%; }
+
+  /* Panel (splitter / animator / packer) */
+  .panel { background:var(--card); border:1px solid var(--accent); border-radius:var(--radius); margin:24px 0; overflow:hidden; box-shadow:0 8px 32px rgba(124,58,237,.15); }
+  .panel-header { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border); background:rgba(124,58,237,.05); }
+  .panel-header h3 { font-family:'Pixelify Sans', monospace; font-size:18px; color:var(--text); font-weight:600; }
+  .panel-header h3 small { color:var(--muted); font-size:11px; font-family:'JetBrains Mono', monospace; margin-left:8px; font-weight:400; }
+  .panel-body { padding:18px; }
+  .panel-actions { padding:14px 18px; border-top:1px solid var(--border); display:flex; gap:10px; flex-wrap:wrap; background:var(--surface); }
+  .panel-btn { padding:10px 18px; font-family:'Pixelify Sans', monospace; font-size:14px; cursor:pointer; border-radius:var(--radius); border:1px solid var(--border); background:transparent; color:var(--text); transition:all .15s; }
+  .panel-btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .panel-btn.primary:hover:not(:disabled) { background:#6d28d9; }
+  .panel-btn:hover:not(:disabled) { border-color:var(--accent2); color:var(--accent2); }
+  .panel-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .panel-btn.danger { color:var(--danger); }
+  .panel-btn.danger:hover { border-color:var(--danger); }
+  .panel-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:680px) { .panel-grid-2 { grid-template-columns:1fr; } }
+  .panel-form { display:flex; flex-direction:column; gap:12px; }
+  .panel-form label { display:flex; flex-direction:column; gap:4px; font-size:11px; color:var(--muted); }
+  .panel-form label.inline { flex-direction:row; align-items:center; gap:8px; }
+  .panel-form .info { font-size:11px; color:var(--accent3); margin-top:4px; }
+
+  /* Splitter overlay */
+  .splitter-canvas-wrap { position:relative; background:repeating-conic-gradient(#1e1e2e 0% 25%, #151520 0% 50%) 0 0 / 16px 16px; padding:8px; border-radius:var(--radius); display:flex; align-items:center; justify-content:center; min-height:240px; }
+  .splitter-canvas-wrap canvas { max-width:100%; max-height:340px; image-rendering:pixelated; image-rendering:crisp-edges; display:block; }
+
+  /* Animator */
+  .frame-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(72px,1fr)); gap:6px; max-height:240px; overflow-y:auto; padding:4px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
+  .frame-thumb { position:relative; aspect-ratio:1; background:repeating-conic-gradient(#1e1e2e 0% 25%, #151520 0% 50%) 0 0 / 8px 8px; border:1px solid var(--border); border-radius:2px; cursor:grab; transition:border-color .15s; overflow:hidden; user-select:none; }
+  .frame-thumb:hover { border-color:var(--accent2); }
+  .frame-thumb.dragging { opacity:.4; cursor:grabbing; }
+  .frame-thumb img { width:100%; height:100%; object-fit:contain; image-rendering:pixelated; image-rendering:crisp-edges; pointer-events:none; }
+  .frame-thumb .idx { position:absolute; top:2px; left:2px; background:rgba(0,0,0,.7); color:#fff; font-size:9px; padding:1px 4px; border-radius:2px; font-weight:600; }
+  .frame-thumb .x { position:absolute; top:2px; right:2px; background:rgba(0,0,0,.7); color:#fff; width:14px; height:14px; border-radius:2px; display:flex; align-items:center; justify-content:center; font-size:10px; cursor:pointer; opacity:0; transition:opacity .15s; }
+  .frame-thumb:hover .x { opacity:1; }
+  .frame-thumb .x:hover { background:var(--danger); }
+  .anim-preview-wrap { background:repeating-conic-gradient(#1e1e2e 0% 25%, #151520 0% 50%) 0 0 / 16px 16px; padding:12px; border-radius:var(--radius); display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:200px; gap:10px; }
+  .anim-preview-wrap canvas { max-width:100%; max-height:200px; image-rendering:pixelated; image-rendering:crisp-edges; }
+  .anim-info { font-size:10px; color:var(--muted); text-align:center; }
+
+  /* Section title */
+  .section-title { font-size:10px; text-transform:uppercase; letter-spacing:.12em; color:var(--muted); margin-bottom:16px; margin-top:32px; display:flex; align-items:center; gap:8px; }
+  .section-title::after { content:''; flex:1; height:1px; background:var(--border); }
+  .section-title .count { color:var(--accent3); font-family:'Pixelify Sans', monospace; font-size:14px; }
+
+  /* File cards */
+  .files-list { display:flex; flex-direction:column; gap:14px; }
+  .file-card { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; transition:border-color .2s; }
+  .file-card.processing { border-color:var(--accent2); }
+  .file-card.done { border-color:rgba(34,197,94,.4); }
+  .file-card.error { border-color:var(--danger); }
+  .file-card-header { display:flex; align-items:center; gap:12px; padding:10px 14px; border-bottom:1px solid var(--border); font-size:11px; }
+  .file-card-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:500; }
+  .file-card-size { color:var(--muted); font-size:10px; }
+  .file-card-status { font-size:9px; text-transform:uppercase; letter-spacing:.1em; padding:3px 8px; border-radius:2px; background:rgba(100,116,139,.2); color:var(--muted); }
+  .file-card.processing .file-card-status { background:rgba(6,182,212,.2); color:var(--accent2); border:1px solid rgba(6,182,212,.4); }
+  .file-card.done .file-card-status { background:rgba(34,197,94,.15); color:var(--pixel); border:1px solid rgba(34,197,94,.3); }
+  .file-card.error .file-card-status { background:rgba(239,68,68,.15); color:var(--danger); border:1px solid rgba(239,68,68,.3); }
+  .icon-btn { background:transparent; border:1px solid var(--border); color:var(--muted); width:24px; height:24px; border-radius:2px; cursor:pointer; font-size:13px; line-height:1; display:flex; align-items:center; justify-content:center; transition:all .15s; }
+  .icon-btn:hover { color:var(--accent2); border-color:var(--accent2); }
+  .icon-btn.danger:hover { color:var(--danger); border-color:var(--danger); }
+  .file-card-body { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--border); }
+  @media (max-width:640px) { .file-card-body { grid-template-columns:1fr; } }
+  .preview-pane { background:var(--card); display:flex; flex-direction:column; }
+  .preview-pane-label { padding:8px 14px; font-size:9px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); border-bottom:1px solid var(--border); }
+  .preview-img-wrap { background:repeating-conic-gradient(#1e1e2e 0% 25%, #151520 0% 50%) 0 0 / 20px 20px; display:flex; align-items:center; justify-content:center; min-height:240px; flex:1; position:relative; overflow:hidden; cursor:none; }
+  .preview-img-wrap.empty { cursor:default; }
+  .preview-img-wrap img { max-width:100%; max-height:340px; object-fit:contain; image-rendering:pixelated; image-rendering:crisp-edges; display:block; user-select:none; pointer-events:none; }
+  .preview-empty-text { color:var(--muted); font-size:11px; opacity:.5; }
+
+  /* Magnifier */
+  .magnifier { position:absolute; width:140px; height:140px; border-radius:50%; border:3px solid rgba(255,255,255,.85); box-shadow:0 0 0 1px rgba(0,0,0,.6),0 10px 40px rgba(0,0,0,.7),inset 0 0 0 1px rgba(255,255,255,.1); pointer-events:none; display:none; z-index:10; transform:translate(-50%,-50%); background-repeat:no-repeat; image-rendering:pixelated; image-rendering:crisp-edges; }
+  .magnifier::before { content:''; position:absolute; inset:0; border-radius:50%; background:linear-gradient(135deg,rgba(255,255,255,.2) 0%,transparent 55%); z-index:2; pointer-events:none; }
+  .magnifier::after { content:''; position:absolute; inset:0; border-radius:50%; background:linear-gradient(rgba(255,255,255,.4) 1px,transparent 1px) center/100% 50%,linear-gradient(90deg,rgba(255,255,255,.4) 1px,transparent 1px) center/50% 100%; background-repeat:no-repeat; z-index:3; pointer-events:none; opacity:.25; }
+
+  .file-card-footer { padding:10px 14px; display:flex; align-items:center; gap:12px; font-size:10px; color:var(--muted); border-top:1px solid var(--border); flex-wrap:wrap; }
+  .file-card-stats { flex:1; display:flex; gap:14px; flex-wrap:wrap; min-width:0; }
+  .file-card-stats span strong { color:var(--accent3); font-family:'Pixelify Sans', monospace; }
+  .download-single { color:var(--pixel); font-size:11px; text-decoration:none; padding:4px 10px; border:1px solid rgba(34,197,94,.4); border-radius:2px; transition:background .15s; }
+  .download-single:hover { background:rgba(34,197,94,.15); }
+  .split-btn { color:var(--accent3); font-size:11px; padding:4px 10px; border:1px solid rgba(245,158,11,.4); border-radius:2px; cursor:pointer; background:transparent; transition:background .15s; font-family:'JetBrains Mono', monospace; }
+  .split-btn:hover { background:rgba(245,158,11,.15); }
+
+  /* Post-actions */
+  .post-actions { display:flex; gap:10px; flex-wrap:wrap; margin:24px 0 0; padding:18px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); }
+  .post-actions h4 { font-family:'Pixelify Sans', monospace; font-size:14px; color:var(--text); margin-right:auto; align-self:center; }
+  .post-action-btn { padding:10px 18px; font-family:'Pixelify Sans', monospace; font-size:14px; cursor:pointer; border-radius:var(--radius); border:1px solid var(--border); background:var(--surface); color:var(--text); transition:all .15s; display:flex; align-items:center; gap:6px; }
+  .post-action-btn:hover { border-color:var(--accent2); color:var(--accent2); }
+
+  /* Pills */
+  .info-row { display:flex; gap:8px; flex-wrap:wrap; margin:32px 0 0; }
+  .pill { font-size:10px; padding:4px 10px; border-radius:2px; background:var(--surface); border:1px solid var(--border); color:var(--muted); letter-spacing:.05em; }
+  .pill strong { color:var(--text); }
+
+  footer { margin-top:80px; padding-top:24px; border-top:1px solid var(--border); font-size:11px; color:var(--muted); line-height:2; }
+  footer a { color:var(--muted); text-decoration:none; transition:color .15s; }
+  footer a:hover { color:var(--accent2); }
+  .credit { color:rgba(124,58,237,.55); font-size:10px; }
+
+  .wasm-notice { padding:12px 16px; background:rgba(245,158,11,.1); border:1px solid rgba(245,158,11,.3); border-radius:var(--radius); font-size:11px; color:var(--accent3); margin-bottom:16px; display:none; }
+  .wasm-notice.visible { display:block; }
 </style>
 </head>
 <body>
-
 <div class="wrapper">
 
-  <!-- Header -->
   <header>
     <div class="logo">
       <div class="logo-icon" id="logoGrid"></div>
-      <div>
-        <div class="logo-text">Pixel<span>Snapper</span></div>
-      </div>
+      <div class="logo-text">Tachi<span>Pixels</span></div>
     </div>
-    <div class="badge">v0.2.0</div>
+    <div class="badge">v0.4.0 · pipeline</div>
   </header>
 
-  <!-- Hero -->
   <div class="hero">
-    <h1>Fix <em>AI pixel art</em><br>in one click.</h1>
-    <p>Snaps messy, inconsistent pixels to a perfect grid. Quantizes colors to a strict palette. Designed for AI-generated sprites, tilemaps, and 2D assets.</p>
+    <h1>Full <em>AI sprite pipeline</em><br>in your browser.</h1>
+    <p>Snap pixels · quantize palettes · remove backgrounds · clean up edges · split sprite-sheets · pack atlases · build animated GIFs. Everything runs locally — no server, no API keys, no upload limits.</p>
   </div>
 
-  <!-- WASM notice -->
-  <div class="wasm-notice" id="wasmNotice">
-    ⚠ WASM module not loaded. Build it with <code>wasm-pack build --target web --out-dir pkg --release</code> and serve from the project root.
-  </div>
+  <div class="wasm-notice" id="wasmNotice">⚠ WASM module not loaded. Run: <code>wasm-pack build --target web --out-dir pkg --release</code></div>
 
-  <!-- Drop zone -->
   <div class="drop-zone" id="dropZone">
-    <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/bmp,image/webp" />
-    <span class="drop-icon">🎮</span>
-    <div class="drop-label">Drop your image here</div>
-    <div class="drop-sub">PNG · JPG · GIF · BMP · WEBP &nbsp;/&nbsp; max 10 000 × 10 000</div>
+    <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/bmp,image/webp" multiple />
+    <span class="drop-icon" id="dropIcon">🎮</span>
+    <div class="drop-label" id="dropLabel">Drop one or many images here</div>
+    <div class="drop-sub" id="dropSub">PNG · JPG · GIF · BMP · WEBP &nbsp;/&nbsp; max 10 000 × 10 000<br>or paste from clipboard with <kbd>Ctrl</kbd>+<kbd>V</kbd></div>
   </div>
 
-  <!-- Controls -->
-  <div class="controls">
+  <!-- Sprite-sheet detection banner -->
+  <div id="sheetSuggestBanner" style="display:none; margin-top:16px; padding:14px 18px; background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.4); border-radius:var(--radius); display:none; align-items:center; gap:14px;">
+    <span style="font-size:24px;">💡</span>
+    <div style="flex:1; font-size:12px; line-height:1.6;">
+      <strong style="color:var(--accent3);">Looks like a sprite sheet</strong> — <span id="sheetSuggestText">detected an N×M grid</span>.<br>
+      <span style="color:var(--muted);">For best results, split it into individual frames <strong>before</strong> snapping pixels — otherwise auto-detection may treat the whole sheet as one giant pixel.</span>
+    </div>
+    <button class="panel-btn primary" id="sheetSplitBtn" style="white-space:nowrap;">✂ Split now</button>
+    <button class="icon-btn" id="sheetDismissBtn" title="Dismiss">✕</button>
+  </div>
 
+  <div class="controls">
     <div class="control-group">
       <div class="control-label"><span class="dot"></span> Palette colors</div>
       <div class="control-value" id="kVal">16</div>
       <input type="range" id="kSlider" min="2" max="64" value="16" step="1" />
     </div>
-
     <div class="control-group">
       <div class="control-label"><span class="dot" style="background:var(--accent2)"></span> Pixel size</div>
       <div class="control-value" id="pixelSizeVal" style="color:var(--accent2)">Auto</div>
       <input type="range" id="pixelSizeSlider" min="0" max="32" value="0" step="1" />
     </div>
-
     <div class="control-group">
       <div class="control-label"><span class="dot" style="background:var(--accent3)"></span> Upscale</div>
       <div class="control-value" id="upscaleVal" style="color:var(--accent3)">1×</div>
       <select id="upscaleSelect">
-        <option value="1">1× (original size)</option>
+        <option value="1">1× (original)</option>
         <option value="2">2× upscale</option>
         <option value="4">4× upscale</option>
         <option value="8">8× upscale</option>
       </select>
     </div>
-
+    <div class="control-group">
+      <div class="control-label"><span class="dot" style="background:#22c55e"></span> Palette preset</div>
+      <div class="control-value" id="paletteName" style="color:var(--pixel); font-size:16px;">Auto</div>
+      <select id="paletteSelect">
+        <option value="auto">Auto (k-means)</option>
+        <option value="gameboy">GameBoy DMG (4)</option>
+        <option value="gameboy-pocket">GameBoy Pocket (4)</option>
+        <option value="pico8">PICO-8 (16)</option>
+        <option value="nes">NES (54)</option>
+        <option value="cga">CGA (4)</option>
+        <option value="zx">ZX Spectrum (15)</option>
+        <option value="aap64">AAP-64 (64)</option>
+        <option value="endesga32">Endesga 32 (32)</option>
+        <option value="sweetie16">Sweetie 16 (16)</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <div class="control-label"><span class="dot" style="background:#ec4899"></span> Background</div>
+      <div class="control-value" id="bgVal" style="color:#ec4899; font-size:16px;">Off</div>
+      <label class="control-toggle" style="font-size:11px; color:var(--muted); margin-top:4px;">
+        <input type="checkbox" id="bgRemove" />
+        Remove (auto-detect)
+      </label>
+      <input type="range" id="bgTolerance" min="0" max="100" value="35" step="1" style="margin-top:8px;" disabled />
+    </div>
+    <div class="control-group">
+      <div class="control-label"><span class="dot" style="background:#a78bfa"></span> Alpha threshold</div>
+      <div class="control-value" id="thresholdVal" style="color:#a78bfa">Off</div>
+      <input type="range" id="thresholdSlider" min="0" max="255" value="0" step="1" />
+    </div>
   </div>
 
-  <!-- Process button -->
-  <button class="process-btn" id="processBtn" disabled>
-    ▶ SNAP PIXELS
-  </button>
+  <div class="action-bar">
+    <button class="process-btn" id="processBtn" disabled>▶ SNAP PIXELS</button>
+    <button class="secondary-btn" id="zipBtn" disabled>⬇ ZIP All</button>
+    <button class="secondary-btn" id="clearBtn" disabled>✕ Clear</button>
+  </div>
 
-  <!-- Status -->
   <div class="status-bar" id="statusBar">
     <div class="status-dot"></div>
-    <span id="statusText">Load an image to begin.</span>
+    <span id="statusText">Drop images or paste with Ctrl+V to begin.</span>
+    <div class="progress-bar" id="progressBar" style="display:none;"><div class="progress-fill" id="progressFill"></div></div>
   </div>
 
-  <!-- Preview section -->
-  <div class="preview-section" id="previewSection">
+  <!-- Panel host (splitter / animator / packer appears here) -->
+  <div id="panelHost"></div>
 
-    <div class="section-title">Result</div>
-
-    <div class="stats-row" id="statsRow">
-      <div class="stat-card">
-        <div class="stat-label">Detected px size</div>
-        <div class="stat-val" id="statPxSize">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Output size</div>
-        <div class="stat-val" id="statOutSize">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Colors</div>
-        <div class="stat-val" id="statColors">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Processing</div>
-        <div class="stat-val" id="statTime">—</div>
-      </div>
-    </div>
-
-    <div class="preview-grid">
-      <div class="preview-card">
-        <div class="preview-card-header">
-          Original <span class="tag before">BEFORE</span>
-        </div>
-        <div class="preview-img-wrap">
-          <img id="beforeImg" src="" alt="Before" />
-        </div>
-        <div class="img-meta">
-          <span id="beforeMeta">—</span>
-        </div>
-      </div>
-
-      <div class="preview-card">
-        <div class="preview-card-header">
-          Snapped <span class="tag after">AFTER</span>
-        </div>
-        <div class="preview-img-wrap">
-          <img id="afterImg" src="" alt="After" />
-        </div>
-        <div class="img-meta">
-          <span id="afterMeta">—</span>
-        </div>
-      </div>
-    </div>
-
-    <a class="download-btn" id="downloadBtn" href="#" download="snapped.png">
-      ⬇ Download snapped.png
-    </a>
-
+  <div id="filesSection" style="display:none;">
+    <div class="section-title">Queue <span class="count" id="fileCount">0</span></div>
+    <div class="files-list" id="filesList"></div>
   </div>
 
-  <!-- Info pills -->
+  <!-- Post-process actions (appears when ≥1 file done) -->
+  <div class="post-actions" id="postActions" style="display:none;">
+    <h4>Post-processing</h4>
+    <button class="post-action-btn" id="animateBtn">🎞 Animate (GIF)</button>
+    <button class="post-action-btn" id="packBtn">🧱 Pack as sheet</button>
+  </div>
+
   <div class="info-row">
     <div class="pill">Built with <strong>Rust + WASM</strong></div>
-    <div class="pill">Algorithm: <strong>k-means++ · gradient walker</strong></div>
-    <div class="pill">Runs <strong>100% in your browser</strong></div>
-    <div class="pill">Open source · <strong>MIT</strong></div>
+    <div class="pill"><strong>Batch</strong> up to 100</div>
+    <div class="pill"><strong>10 retro palettes</strong></div>
+    <div class="pill"><strong>BG removal</strong> + alpha threshold</div>
+    <div class="pill"><strong>Splitter</strong> + Packer + Animator</div>
+    <div class="pill"><strong>100% in browser</strong></div>
   </div>
 
-  <!-- Footer -->
   <footer>
-    <span>Pixel Snapper — <a href="https://github.com/YOUR_USERNAME/pixel-snapper">GitHub</a></span>
-    <span>Forked from <a href="https://github.com/Hugo-Dz/spritefusion-pixel-snapper">Hugo-Dz/spritefusion-pixel-snapper</a></span>
+    <div><strong style="color:var(--text)">TachiPixels</strong> — created by <a href="https://github.com/tachikomared">TachikomaRed</a> · <a href="https://x.com/smolemaru">@smolemaru</a></div>
+    <div class="credit">Homage to <a href="https://github.com/Hugo-Dz/spritefusion-pixel-snapper">Hugo-Dz / spritefusion-pixel-snapper</a> · <a href="https://spritefusion.com">Sprite Fusion</a> by Hugo Duprez · MIT License</div>
   </footer>
 
 </div>
 
 <script type="module">
-// ─── Logo generator ────────────────────────────────────────────────────────
-const LOGO_COLORS = [
-  '#7c3aed','#6d28d9','#5b21b6','#4c1d95',
-  '#06b6d4','#0891b2','#0e7490','#164e63',
-  '#22c55e','#16a34a','#f59e0b','#d97706',
-  '#0a0a0f','#12121a','#7c3aed','#06b6d4',
-];
-const grid = document.getElementById('logoGrid');
-LOGO_COLORS.forEach(c => {
-  const s = document.createElement('span');
-  s.style.background = c;
-  grid.appendChild(s);
-});
+// ─── Logo ────────────────────────────────────────────────────────────────
+const COLORS=['#7c3aed','#6d28d9','#5b21b6','#4c1d95','#06b6d4','#0891b2','#0e7490','#164e63','#22c55e','#16a34a','#f59e0b','#d97706','#0a0a0f','#12121a','#7c3aed','#06b6d4'];
+document.getElementById('logoGrid').innerHTML=COLORS.map(c=>`<span style="background:${c}"></span>`).join('');
 
-// ─── State ────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+// ─── Palettes ────────────────────────────────────────────────────────────
+const PALETTES = {
+  'gameboy':[[15,56,15],[48,98,48],[139,172,15],[155,188,15]],
+  'gameboy-pocket':[[0,0,0],[85,85,85],[170,170,170],[255,255,255]],
+  'pico8':[[0,0,0],[29,43,83],[126,37,83],[0,135,81],[171,82,54],[95,87,79],[194,195,199],[255,241,232],[255,0,77],[255,163,0],[255,236,39],[0,228,54],[41,173,255],[131,118,156],[255,119,168],[255,204,170]],
+  'cga':[[0,0,0],[85,255,255],[255,85,255],[255,255,255]],
+  'zx':[[0,0,0],[0,0,205],[205,0,0],[205,0,205],[0,205,0],[0,205,205],[205,205,0],[205,205,205],[0,0,255],[255,0,0],[255,0,255],[0,255,0],[0,255,255],[255,255,0],[255,255,255]],
+  'sweetie16':[[26,28,44],[93,39,93],[177,62,83],[239,125,87],[255,205,117],[167,240,112],[56,183,100],[37,113,121],[41,54,111],[59,93,201],[65,166,246],[115,239,247],[244,244,244],[148,176,194],[86,108,134],[51,60,87]],
+  'endesga32':[[190,74,47],[215,118,67],[228,166,114],[255,206,123],[199,109,76],[148,68,57],[91,49,56],[51,57,65],[115,77,69],[156,113,98],[209,166,138],[244,213,189],[220,178,143],[148,186,101],[88,154,84],[40,99,75],[38,69,77],[39,103,138],[78,158,191],[136,212,233],[232,232,235],[255,255,255],[179,210,210],[238,160,128],[217,114,93],[175,67,87],[110,52,79],[64,44,61],[104,53,86],[155,67,124],[196,98,171],[226,148,200]],
+  'aap64':[[6,5,8],[20,16,19],[59,42,57],[91,59,80],[114,77,99],[136,99,123],[159,124,148],[181,150,171],[202,176,194],[222,202,217],[242,229,238],[255,255,255],[183,28,28],[211,47,47],[244,67,54],[239,83,80],[229,115,115],[230,124,115],[255,138,101],[255,167,38],[255,193,7],[255,235,59],[255,238,88],[255,245,157],[205,220,57],[156,204,101],[129,199,132],[102,187,106],[76,175,80],[56,142,60],[27,94,32],[0,150,136],[0,191,165],[26,188,156],[38,166,154],[0,131,143],[0,172,193],[0,188,212],[33,150,243],[100,181,246],[144,202,249],[179,229,252],[63,81,181],[92,107,192],[121,134,203],[126,87,194],[156,39,176],[171,71,188],[186,104,200],[206,147,216],[233,30,99],[244,143,177],[248,187,208],[121,85,72],[141,110,99],[161,136,127],[188,170,164],[97,97,97],[117,117,117],[158,158,158],[189,189,189],[224,224,224],[238,238,238],[245,245,245]],
+  'nes':[[124,124,124],[0,0,252],[0,0,188],[68,40,188],[148,0,132],[168,0,32],[168,16,0],[136,20,0],[80,48,0],[0,120,0],[0,104,0],[0,88,0],[0,64,88],[0,0,0],[0,0,0],[0,0,0],[188,188,188],[0,120,248],[0,88,248],[104,68,252],[216,0,204],[228,0,88],[248,56,0],[228,92,16],[172,124,0],[0,184,0],[0,168,0],[0,168,68],[0,136,136],[0,0,0],[0,0,0],[0,0,0],[248,248,248],[60,188,252],[104,136,252],[152,120,248],[248,120,248],[248,88,152],[248,120,88],[252,160,68],[248,184,0],[184,248,24],[88,216,84],[88,248,152],[0,232,216],[120,120,120],[0,0,0],[0,0,0],[252,252,252],[164,228,252],[184,184,248],[216,184,248],[248,184,248],[248,164,192],[240,208,176],[252,224,168],[248,216,120],[216,248,120],[184,248,184],[184,248,216],[0,252,252],[248,216,248]],
+};
+
+// ─── State ───────────────────────────────────────────────────────────────
+const MAX_FILES = 100;
 let wasm = null;
-let fileBytes = null;
-let lastResultBlob = null;
+const files = [];
+let nextId = 0;
+let processing = false;
+let openPanelType = null; // 'splitter' | 'animator' | 'packer' | null
 
-const dropZone   = document.getElementById('dropZone');
-const fileInput  = document.getElementById('fileInput');
-const processBtn = document.getElementById('processBtn');
-const statusBar  = document.getElementById('statusBar');
-const statusText = document.getElementById('statusText');
-const previewSection = document.getElementById('previewSection');
-const beforeImg  = document.getElementById('beforeImg');
-const afterImg   = document.getElementById('afterImg');
-const downloadBtn= document.getElementById('downloadBtn');
-const beforeMeta = document.getElementById('beforeMeta');
-const afterMeta  = document.getElementById('afterMeta');
-const kSlider    = document.getElementById('kSlider');
-const kVal       = document.getElementById('kVal');
-const pixelSizeSlider = document.getElementById('pixelSizeSlider');
-const pixelSizeVal    = document.getElementById('pixelSizeVal');
-const upscaleSelect   = document.getElementById('upscaleSelect');
-const upscaleVal      = document.getElementById('upscaleVal');
-const wasmNotice = document.getElementById('wasmNotice');
-
-// ─── WASM init ────────────────────────────────────────────────────────────
+// ─── WASM init ───────────────────────────────────────────────────────────
 async function initWasm() {
   try {
     const mod = await import('../pkg/pixel_snapper.js');
     await mod.default();
     wasm = mod;
-    setStatus('idle', 'WASM loaded. Drop an image to begin.');
-  } catch (e) {
-    wasmNotice.classList.add('visible');
-    // Demo mode: allow UI interaction but show mock output
-    setStatus('idle', 'Running in demo mode (WASM not available).');
+    setStatus('idle', 'WASM loaded — drop images, paste, or click to browse.');
+  } catch {
+    $('wasmNotice').classList.add('visible');
+    setStatus('idle', 'Demo mode — WASM not available.');
     wasm = 'demo';
   }
 }
-
 initWasm();
 
-// ─── Slider labels ────────────────────────────────────────────────────────
-kSlider.addEventListener('input', () => {
-  kVal.textContent = kSlider.value;
+// ─── Controls bindings ───────────────────────────────────────────────────
+$('kSlider').addEventListener('input', () => $('kVal').textContent = $('kSlider').value);
+$('pixelSizeSlider').addEventListener('input', () => {
+  const v = +$('pixelSizeSlider').value;
+  $('pixelSizeVal').textContent = v === 0 ? 'Auto' : v + 'px';
+});
+$('upscaleSelect').addEventListener('change', () => $('upscaleVal').textContent = $('upscaleSelect').value + '×');
+$('paletteSelect').addEventListener('change', () => {
+  const opt = $('paletteSelect').selectedOptions[0];
+  $('paletteName').textContent = opt.textContent.replace(/\s\(\d+\)$/, '');
+});
+$('bgRemove').addEventListener('change', () => {
+  const on = $('bgRemove').checked;
+  $('bgTolerance').disabled = !on;
+  $('bgVal').textContent = on ? `Tol ${$('bgTolerance').value}` : 'Off';
+});
+$('bgTolerance').addEventListener('input', () => {
+  if ($('bgRemove').checked) $('bgVal').textContent = `Tol ${$('bgTolerance').value}`;
+});
+$('thresholdSlider').addEventListener('input', () => {
+  const v = +$('thresholdSlider').value;
+  $('thresholdVal').textContent = v === 0 ? 'Off' : v.toString();
 });
 
-pixelSizeSlider.addEventListener('input', () => {
-  const v = parseInt(pixelSizeSlider.value);
-  pixelSizeVal.textContent = v === 0 ? 'Auto' : `${v}px`;
+// ─── Drop zone & paste ───────────────────────────────────────────────────
+const dz = $('dropZone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('over'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('over');
+  if (e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]);
 });
-
-upscaleSelect.addEventListener('change', () => {
-  upscaleVal.textContent = upscaleSelect.value + '×';
+dz.addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', () => {
+  if ($('fileInput').files.length) addFiles([...$('fileInput').files]);
+  $('fileInput').value = '';
 });
-
-// ─── Drop zone ────────────────────────────────────────────────────────────
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('over'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
-dropZone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropZone.classList.remove('over');
-  const file = e.dataTransfer.files[0];
-  if (file) loadFile(file);
-});
-dropZone.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', () => {
-  if (fileInput.files[0]) loadFile(fileInput.files[0]);
-});
-
-// ─── Load file ────────────────────────────────────────────────────────────
-function loadFile(file) {
-  const reader = new FileReader();
-  reader.onload = async ev => {
-    fileBytes = new Uint8Array(ev.target.result);
-
-    // Show before image
-    const blob = new Blob([fileBytes], { type: file.type });
-    beforeImg.src = URL.createObjectURL(blob);
-
-    const img = new Image();
-    img.onload = () => {
-      beforeMeta.textContent = `${img.naturalWidth} × ${img.naturalHeight}`;
-    };
-    img.src = beforeImg.src;
-
-    processBtn.disabled = false;
-    setStatus('idle', `Loaded: ${file.name} (${(file.size/1024).toFixed(1)} KB)`);
-
-    // Auto-detect pixel size if WASM available
-    if (wasm && wasm !== 'demo') {
-      try {
-        const detected = wasm.detect_pixel_size(fileBytes);
-        if (pixelSizeSlider.value == 0) {
-          setStatus('idle', `Loaded: ${file.name} — auto-detected pixel size: ${detected}px`);
-        }
-      } catch (_) {}
-    }
-  };
-  reader.readAsArrayBuffer(file);
-}
-
-// ─── Process ─────────────────────────────────────────────────────────────
-processBtn.addEventListener('click', async () => {
-  if (!fileBytes) return;
-
-  processBtn.disabled = true;
-  setStatus('loading', 'Processing…');
-
-  await new Promise(r => setTimeout(r, 20)); // let UI update
-
-  const t0 = performance.now();
-
-  try {
-    const k    = parseInt(kSlider.value);
-    const ps   = parseInt(pixelSizeSlider.value) || undefined;
-    const up   = parseInt(upscaleSelect.value);
-
-    let resultBytes;
-
-    if (wasm && wasm !== 'demo') {
-      resultBytes = wasm.process_image(fileBytes, k, ps, up);
-    } else {
-      // Demo: return the original image (no WASM)
-      resultBytes = fileBytes;
-    }
-
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-
-    const outBlob = new Blob([resultBytes], { type: 'image/png' });
-    const outUrl  = URL.createObjectURL(outBlob);
-    afterImg.src  = outUrl;
-
-    if (lastResultBlob) URL.revokeObjectURL(downloadBtn.href);
-    lastResultBlob = outUrl;
-    downloadBtn.href = outUrl;
-
-    const img = new Image();
-    img.onload = () => {
-      const w = img.naturalWidth;
-      const h = img.naturalHeight;
-      afterMeta.textContent = `${w} × ${h}`;
-
-      document.getElementById('statOutSize').textContent  = `${w}×${h}`;
-      document.getElementById('statColors').textContent   = k;
-      document.getElementById('statTime').textContent     = elapsed + 's';
-
-      if (ps) {
-        document.getElementById('statPxSize').textContent = ps + 'px';
-      } else if (wasm && wasm !== 'demo') {
-        try {
-          document.getElementById('statPxSize').textContent =
-            wasm.detect_pixel_size(fileBytes) + 'px';
-        } catch (_) {
-          document.getElementById('statPxSize').textContent = 'auto';
-        }
+window.addEventListener('paste', async e => {
+  const items = e.clipboardData?.items || [];
+  const imgs = [];
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const blob = item.getAsFile();
+      if (blob) {
+        const ext = item.type.split('/')[1] || 'png';
+        imgs.push(new File([blob], `pasted-${Date.now()}.${ext}`, { type: item.type }));
       }
-    };
-    img.src = outUrl;
-
-    previewSection.classList.add('visible');
-    setStatus('success', `Done in ${elapsed}s — click to download!`);
-
-  } catch (err) {
-    setStatus('error', 'Error: ' + err.toString());
-  } finally {
-    processBtn.disabled = false;
+    }
+  }
+  if (imgs.length) {
+    addFiles(imgs);
+    dz.classList.add('pasted');
+    setTimeout(() => dz.classList.remove('pasted'), 600);
   }
 });
 
+// ─── Add / remove / clear ────────────────────────────────────────────────
+async function addFiles(fileList, opts = {}) {
+  const remaining = MAX_FILES - files.length;
+  if (remaining <= 0) { setStatus('error', `Max ${MAX_FILES} files reached.`); return; }
+  const valid = fileList.slice(0, remaining).filter(f => f.type?.startsWith('image/') || f instanceof Blob);
+  if (valid.length === 0) { setStatus('error', 'No valid image files.'); return; }
+  for (const f of valid) {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    const beforeUrl = URL.createObjectURL(new Blob([bytes], { type: f.type || 'image/png' }));
+    files.push({
+      id: nextId++,
+      name: f.name || `frame-${nextId}.png`,
+      size: bytes.length,
+      bytes, beforeUrl,
+      resultBytes: null, resultUrl: null,
+      status: 'pending', stats: null,
+    });
+  }
+  setStatus('idle', `${files.length} file${files.length !== 1 ? 's' : ''} ready. Click SNAP PIXELS.`);
+  updateDropUI();
+  render();
+
+  // Scroll to queue so user sees their files
+  setTimeout(() => $('filesSection').scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+
+  // If exactly 1 file just added → auto-detect sprite sheet
+  if (files.length === 1 && !opts.skipSheetDetect) {
+    detectAndSuggestSheet(files[0]);
+  } else {
+    hideSheetBanner();
+  }
+}
+
+async function detectAndSuggestSheet(file) {
+  try {
+    const cv = await bytesToCanvas(file.bytes);
+    const guess = autoDetectGrid(cv);
+    if (guess.cols * guess.rows >= 2) {
+      $('sheetSuggestBanner').style.display = 'flex';
+      $('sheetSuggestText').textContent = `detected a ${guess.cols}×${guess.rows} grid (${guess.cols*guess.rows} frames)`;
+      $('sheetSplitBtn').onclick = () => {
+        hideSheetBanner();
+        openSplitter(file.id);
+      };
+      $('sheetDismissBtn').onclick = hideSheetBanner;
+    }
+  } catch (e) {
+    console.warn('Sheet detection failed:', e);
+  }
+}
+function hideSheetBanner() {
+  $('sheetSuggestBanner').style.display = 'none';
+}
+
+function updateDropUI() {
+  if (files.length === 0) {
+    $('dropIcon').textContent = '🎮';
+    $('dropLabel').textContent = 'Drop one or many images here';
+    $('dropSub').innerHTML = `PNG · JPG · GIF · BMP · WEBP &nbsp;/&nbsp; max 10 000 × 10 000<br>or paste from clipboard with <kbd>Ctrl</kbd>+<kbd>V</kbd>`;
+  } else {
+    $('dropIcon').textContent = '✓';
+    $('dropLabel').textContent = `${files.length} file${files.length > 1 ? 's' : ''} loaded — see queue below ↓`;
+    $('dropSub').innerHTML = `Drop more files · paste with <kbd>Ctrl</kbd>+<kbd>V</kbd> · or click <strong style="color:var(--accent2)">▶ SNAP PIXELS</strong> to process all`;
+  }
+}
+
+function removeFile(id) {
+  const idx = files.findIndex(f => f.id === id);
+  if (idx === -1) return;
+  const f = files[idx];
+  URL.revokeObjectURL(f.beforeUrl);
+  if (f.resultUrl) URL.revokeObjectURL(f.resultUrl);
+  files.splice(idx, 1);
+  if (files.length === 0) hideSheetBanner();
+  updateDropUI();
+  render();
+}
+
+$('clearBtn').addEventListener('click', () => {
+  for (const f of files) {
+    URL.revokeObjectURL(f.beforeUrl);
+    if (f.resultUrl) URL.revokeObjectURL(f.resultUrl);
+  }
+  files.length = 0;
+  closePanel();
+  hideSheetBanner();
+  updateDropUI();
+  render();
+  setStatus('idle', 'Cleared.');
+});
+
+// ─── Render ──────────────────────────────────────────────────────────────
+function render() {
+  const sec = $('filesSection');
+  const post = $('postActions');
+  if (files.length === 0) {
+    sec.style.display = 'none';
+    post.style.display = 'none';
+    $('processBtn').disabled = true;
+    $('zipBtn').disabled = true;
+    $('clearBtn').disabled = true;
+    $('processBtn').textContent = '▶ SNAP PIXELS';
+    return;
+  }
+  sec.style.display = 'block';
+  $('fileCount').textContent = `(${files.length})`;
+  $('processBtn').disabled = processing;
+  $('processBtn').textContent = files.length === 1 ? '▶ SNAP PIXELS' : `▶ SNAP ALL (${files.length})`;
+  $('clearBtn').disabled = processing;
+
+  const doneCount = files.filter(f => f.status === 'done').length;
+  $('zipBtn').disabled = doneCount === 0 || processing;
+  $('zipBtn').textContent = doneCount > 1 ? `⬇ ZIP All (${doneCount})` : (doneCount === 1 ? '⬇ Download' : '⬇ ZIP All');
+
+  // Show post-actions if ≥1 done
+  post.style.display = (doneCount >= 1 && !processing) ? 'flex' : 'none';
+  $('animateBtn').disabled = doneCount < 2;
+  $('animateBtn').title = doneCount < 2 ? 'Need ≥2 frames to animate' : 'Build animated GIF';
+
+  const list = $('filesList');
+  list.innerHTML = '';
+  for (const f of files) {
+    const childCount = files.filter(x => x.parentId === f.id).length;
+    const isSource = childCount > 0;
+    const isChild = f.parentId != null;
+    const card = document.createElement('div');
+    card.className = `file-card ${f.status === 'done' ? 'done' : f.status === 'processing' ? 'processing' : f.status === 'error' ? 'error' : ''}`;
+    card.innerHTML = `
+      <div class="file-card-header">
+        <div class="file-card-name">${escapeHtml(f.name)}</div>
+        ${isSource ? `<span class="badge-tag" style="background:rgba(245,158,11,.15); color:var(--accent3); border:1px solid rgba(245,158,11,.4); padding:2px 7px; border-radius:2px; font-size:9px; letter-spacing:.08em;">📄 SOURCE · ${childCount} frames</span>` : ''}
+        ${isChild ? `<span class="badge-tag" style="background:rgba(124,58,237,.15); color:var(--accent); border:1px solid rgba(124,58,237,.4); padding:2px 7px; border-radius:2px; font-size:9px; letter-spacing:.08em;">↳ FRAME</span>` : ''}
+        <div class="file-card-size">${(f.size/1024).toFixed(1)} KB</div>
+        <div class="file-card-status">${f.status}</div>
+        <button class="icon-btn danger" data-action="remove" data-id="${f.id}" title="Remove">✕</button>
+      </div>
+      <div class="file-card-body">
+        <div class="preview-pane">
+          <div class="preview-pane-label">Original · before</div>
+          <div class="preview-img-wrap" data-id="${f.id}" data-side="before">
+            <img src="${f.beforeUrl}" alt="Before" />
+            <div class="magnifier"></div>
+          </div>
+        </div>
+        <div class="preview-pane">
+          <div class="preview-pane-label">Snapped · after</div>
+          <div class="preview-img-wrap ${!f.resultUrl ? 'empty' : ''}" data-id="${f.id}" data-side="after">
+            ${f.resultUrl ? `<img src="${f.resultUrl}" alt="After" /><div class="magnifier"></div>` : '<div class="preview-empty-text">— not processed yet —</div>'}
+          </div>
+        </div>
+      </div>
+      <div class="file-card-footer">
+        <div class="file-card-stats">
+          ${f.stats ? `
+            <span>px: <strong>${f.stats.px}</strong></span>
+            <span>out: <strong>${f.stats.out}</strong></span>
+            <span>colors: <strong>${f.stats.colors}</strong></span>
+            <span>time: <strong>${f.stats.time}s</strong></span>
+          ` : '<span>—</span>'}
+        </div>
+        <button class="split-btn" data-action="split" data-id="${f.id}">${isSource ? '🔄 Re-split' : '✂ Split frames'}</button>
+        ${f.resultUrl ? `<a class="download-single" href="${f.resultUrl}" download="snapped-${escapeAttr(f.name.replace(/\.[^.]+$/, ''))}.png">⬇ PNG</a>` : ''}
+      </div>
+    `;
+    list.appendChild(card);
+  }
+
+  list.querySelectorAll('.preview-img-wrap:not(.empty)').forEach(wrap => {
+    const img = wrap.querySelector('img');
+    if (img) attachMagnifier(wrap, img);
+  });
+}
+
+// One-time delegated click handler for the files list
+$('filesList').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  const id = +btn.dataset.id;
+  if (btn.dataset.action === 'remove') removeFile(id);
+  if (btn.dataset.action === 'split') openSplitter(id);
+});
+
+// ─── Process all ─────────────────────────────────────────────────────────
+$('processBtn').addEventListener('click', async () => {
+  if (files.length === 0 || processing) return;
+  processing = true;
+  closePanel();
+  $('processBtn').disabled = true;
+  $('clearBtn').disabled = true;
+
+  const k  = +$('kSlider').value;
+  const ps = +$('pixelSizeSlider').value || undefined;
+  const up = +$('upscaleSelect').value;
+  const pal = $('paletteSelect').value;
+  const bgOn = $('bgRemove').checked;
+  const bgTol = +$('bgTolerance').value;
+  const threshold = +$('thresholdSlider').value;
+
+  const todo = files.filter(f => f.status !== 'done');
+  let done = 0;
+  $('progressBar').style.display = 'block';
+  setStatus('loading', `Processing 0/${todo.length}…`);
+
+  for (const f of todo) {
+    f.status = 'processing'; render();
+    await new Promise(r => setTimeout(r, 10));
+    const t0 = performance.now();
+    try {
+      let bytes;
+      if (wasm && wasm !== 'demo') {
+        bytes = wasm.process_image(f.bytes, k, ps, up);
+      } else {
+        bytes = f.bytes;
+      }
+      // Post-processing pipeline
+      if (bgOn) bytes = await postRemoveBackground(bytes, bgTol);
+      if (threshold > 0) bytes = await postAlphaThreshold(bytes, threshold);
+      if (pal !== 'auto' && PALETTES[pal]) bytes = await postPalette(bytes, PALETTES[pal]);
+
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      if (f.resultUrl) URL.revokeObjectURL(f.resultUrl);
+      f.resultBytes = bytes;
+      f.resultUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+      const dim = await imageSize(f.resultUrl);
+      let pxSize = ps || 'auto';
+      if (!ps && wasm && wasm !== 'demo') {
+        try { pxSize = wasm.detect_pixel_size(f.bytes); } catch {}
+      }
+      const colorsUsed = pal !== 'auto' ? PALETTES[pal].length : k;
+      f.stats = { px: pxSize + (typeof pxSize === 'number' ? 'px' : ''), out: `${dim.w}×${dim.h}`, colors: colorsUsed, time: elapsed };
+      f.status = 'done';
+    } catch (err) {
+      f.status = 'error';
+      f.stats = { px: '—', out: '—', colors: '—', time: 'err' };
+      console.error('Processing failed:', f.name, err);
+    }
+    done++;
+    $('progressFill').style.width = `${(done/todo.length)*100}%`;
+    setStatus('loading', `Processing ${done}/${todo.length}…`);
+    render();
+  }
+  $('progressBar').style.display = 'none';
+  $('progressFill').style.width = '0%';
+  processing = false;
+  const errCount = files.filter(f => f.status === 'error').length;
+  setStatus(errCount ? 'error' : 'success',
+    errCount ? `Done with ${errCount} error${errCount > 1 ? 's' : ''}.` : `Done! ${todo.length} processed.`);
+  render();
+});
+
+// ─── ZIP ─────────────────────────────────────────────────────────────────
+$('zipBtn').addEventListener('click', async () => {
+  const done = files.filter(f => f.status === 'done');
+  if (done.length === 0) return;
+  if (done.length === 1) {
+    const f = done[0];
+    triggerDownload(f.resultUrl, `snapped-${f.name.replace(/\.[^.]+$/, '')}.png`);
+    return;
+  }
+  setStatus('loading', 'Creating ZIP…');
+  const zip = new JSZip();
+  for (const f of done) {
+    zip.file(`snapped-${f.name.replace(/\.[^.]+$/, '')}.png`, f.resultBytes);
+  }
+  const blob = await zip.generateAsync({ type: 'blob' });
+  triggerDownload(URL.createObjectURL(blob), `tachi-pixels-${Date.now()}.zip`);
+  setStatus('success', `ZIP downloaded (${done.length} files).`);
+});
+
+// ─── Image utilities ─────────────────────────────────────────────────────
+async function bytesToCanvas(bytes) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+  try {
+    const img = await loadImage(url);
+    const cv = document.createElement('canvas');
+    cv.width = img.naturalWidth;
+    cv.height = img.naturalHeight;
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, 0, 0);
+    return cv;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+function loadImage(url) {
+  return new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = rej;
+    i.src = url;
+  });
+}
+function canvasToBytes(cv) {
+  return new Promise(res => cv.toBlob(async b => res(new Uint8Array(await b.arrayBuffer())), 'image/png'));
+}
+function imageSize(url) {
+  return loadImage(url).then(i => ({ w: i.naturalWidth, h: i.naturalHeight }));
+}
+
+// ─── Post: background removal (flood-fill + edge cleanup) ───────────────
+async function postRemoveBackground(bytes, tolerance) {
+  const cv = await bytesToCanvas(bytes);
+  const ctx = cv.getContext('2d');
+  const id = ctx.getImageData(0, 0, cv.width, cv.height);
+  const d = id.data;
+  const w = cv.width, h = cv.height;
+
+  // 1. Sample corners + edges to find background color
+  const samples = [
+    [0,0],[w-1,0],[0,h-1],[w-1,h-1],
+    [Math.floor(w/2),0],[Math.floor(w/2),h-1],
+    [0,Math.floor(h/2)],[w-1,Math.floor(h/2)],
+  ];
+  const counts = new Map();
+  for (const [x,y] of samples) {
+    const i = (y*w + x) * 4;
+    if (d[i+3] < 50) continue;
+    const key = `${d[i]},${d[i+1]},${d[i+2]}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  if (counts.size === 0) return bytes; // already transparent
+  const topKey = [...counts.entries()].sort((a,b) => b[1]-a[1])[0][0];
+  const [br, bgC, bb] = topKey.split(',').map(Number);
+
+  const tolSq = (tolerance / 100) ** 2 * (255*255*3);
+  const haloTolSq = (Math.min(100, tolerance * 1.8) / 100) ** 2 * (255*255*3);
+
+  // 2. Build mask of all pixels close to bg color (within tolerance)
+  const isBg = new Uint8Array(w * h);
+  for (let p = 0, i = 0; p < w*h; p++, i += 4) {
+    if (d[i+3] === 0) { isBg[p] = 1; continue; }
+    const dr = d[i]-br, dg = d[i+1]-bgC, db = d[i+2]-bb;
+    if (dr*dr + dg*dg + db*db <= tolSq) isBg[p] = 1;
+  }
+
+  // 3. Flood-fill from edge seeds — only mark CONNECTED bg pixels
+  // This preserves bg-colored pixels INSIDE the sprite (e.g. white eyes/armor)
+  const connected = new Uint8Array(w * h);
+  const stack = [];
+
+  // Seed: every Nth pixel along all 4 edges
+  const step = Math.max(1, Math.floor(Math.min(w, h) / 32));
+  for (let x = 0; x < w; x += step) {
+    if (isBg[x]) stack.push(x);
+    if (isBg[(h-1)*w + x]) stack.push((h-1)*w + x);
+  }
+  for (let y = 0; y < h; y += step) {
+    if (isBg[y*w]) stack.push(y*w);
+    if (isBg[y*w + (w-1)]) stack.push(y*w + (w-1));
+  }
+
+  // Iterative flood fill (BFS-ish via stack)
+  while (stack.length > 0) {
+    const p = stack.pop();
+    if (connected[p]) continue;
+    connected[p] = 1;
+    const x = p % w, y = (p - x) / w;
+    if (x > 0     && isBg[p-1] && !connected[p-1]) stack.push(p-1);
+    if (x < w-1   && isBg[p+1] && !connected[p+1]) stack.push(p+1);
+    if (y > 0     && isBg[p-w] && !connected[p-w]) stack.push(p-w);
+    if (y < h-1   && isBg[p+w] && !connected[p+w]) stack.push(p+w);
+  }
+
+  // 4. Set connected bg pixels to transparent
+  for (let p = 0; p < w*h; p++) {
+    if (connected[p]) d[p*4 + 3] = 0;
+  }
+
+  // 5. Edge cleanup — multi-pass halo removal
+  // For each non-transparent pixel that has a transparent neighbor,
+  // if it's close to bg color (with elevated tolerance), make transparent too.
+  // This eats anti-aliased halos around the sprite.
+  for (let pass = 0; pass < 3; pass++) {
+    const queue = [];
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const p = y*w + x, i = p*4;
+        if (d[i+3] === 0) continue;
+        // Has transparent neighbor?
+        let touchesEmpty = false;
+        if (x > 0     && d[(p-1)*4 + 3] === 0)   touchesEmpty = true;
+        else if (x < w-1 && d[(p+1)*4 + 3] === 0) touchesEmpty = true;
+        else if (y > 0     && d[(p-w)*4 + 3] === 0) touchesEmpty = true;
+        else if (y < h-1   && d[(p+w)*4 + 3] === 0) touchesEmpty = true;
+        if (!touchesEmpty) continue;
+        // Close to bg color?
+        const dr = d[i]-br, dg = d[i+1]-bgC, db = d[i+2]-bb;
+        if (dr*dr + dg*dg + db*db <= haloTolSq) queue.push(p);
+      }
+    }
+    if (queue.length === 0) break;
+    for (const p of queue) d[p*4 + 3] = 0;
+  }
+
+  ctx.putImageData(id, 0, 0);
+  return canvasToBytes(cv);
+}
+
+// ─── Post: alpha threshold ───────────────────────────────────────────────
+async function postAlphaThreshold(bytes, threshold) {
+  const cv = await bytesToCanvas(bytes);
+  const ctx = cv.getContext('2d');
+  const id = ctx.getImageData(0, 0, cv.width, cv.height);
+  const d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i+3] = d[i+3] < threshold ? 0 : 255;
+  }
+  ctx.putImageData(id, 0, 0);
+  return canvasToBytes(cv);
+}
+
+// ─── Post: palette ───────────────────────────────────────────────────────
+async function postPalette(bytes, palette) {
+  const cv = await bytesToCanvas(bytes);
+  const ctx = cv.getContext('2d');
+  const id = ctx.getImageData(0, 0, cv.width, cv.height);
+  const d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i+3] === 0) continue;
+    const r = d[i], g = d[i+1], b = d[i+2];
+    let bi = 0, bd = Infinity;
+    for (let p = 0; p < palette.length; p++) {
+      const dr = r - palette[p][0], dg = g - palette[p][1], db = b - palette[p][2];
+      const dist = dr*dr + dg*dg + db*db;
+      if (dist < bd) { bd = dist; bi = p; }
+    }
+    d[i] = palette[bi][0]; d[i+1] = palette[bi][1]; d[i+2] = palette[bi][2];
+  }
+  ctx.putImageData(id, 0, 0);
+  return canvasToBytes(cv);
+}
+
+// ─── Panel host ──────────────────────────────────────────────────────────
+function openPanel(html, type) {
+  $('panelHost').innerHTML = html;
+  openPanelType = type;
+  $('panelHost').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function closePanel() {
+  $('panelHost').innerHTML = '';
+  openPanelType = null;
+}
+
+// ─── SPLITTER ────────────────────────────────────────────────────────────
+async function openSplitter(fileId) {
+  const f = files.find(x => x.id === fileId);
+  if (!f) return;
+
+  const cv = await bytesToCanvas(f.bytes);
+  const guess = autoDetectGrid(cv);
+
+  // Check if this file already has children (was split before)
+  const existingChildren = files.filter(x => x.parentId === fileId);
+  const hasChildren = existingChildren.length > 0;
+
+  openPanel(`
+    <div class="panel">
+      <div class="panel-header">
+        <h3>✂ Frame Splitter <small>${escapeHtml(f.name)} · ${cv.width}×${cv.height}${hasChildren ? ' · <span style="color:var(--accent3);">re-splitting</span>' : ''}</small></h3>
+        <button class="icon-btn" id="splitClose">✕</button>
+      </div>
+      <div class="panel-body">
+        ${hasChildren ? `
+          <div style="margin-bottom:14px; padding:10px 14px; background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.4); border-radius:var(--radius); font-size:11px; line-height:1.6;">
+            ⚠️ This file was already split into <strong style="color:var(--accent3);">${existingChildren.length} frame${existingChildren.length>1?'s':''}</strong>. Re-splitting will create new frames alongside the old ones.
+            <button class="panel-btn danger" id="splitRemoveOldChildren" style="margin-top:8px; padding:6px 12px; font-size:12px;">🗑 Remove ${existingChildren.length} old frame${existingChildren.length>1?'s':''} first</button>
+          </div>
+        ` : ''}
+        <div class="panel-grid-2">
+          <div class="splitter-canvas-wrap"><canvas id="splitCanvas"></canvas></div>
+          <div class="panel-form">
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <label>Columns <input type="number" id="splitCols" value="${guess.cols}" min="1" max="64" /></label>
+              <label>Rows <input type="number" id="splitRows" value="${guess.rows}" min="1" max="64" /></label>
+            </div>
+
+            <div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-top:6px;">Margins (skip outer area)</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <label>Top <input type="number" id="mTop" value="${guess.mTop}" min="0" /></label>
+              <label>Left <input type="number" id="mLeft" value="${guess.mLeft}" min="0" /></label>
+              <label>Bottom <input type="number" id="mBottom" value="${guess.mBottom}" min="0" /></label>
+              <label>Right <input type="number" id="mRight" value="${guess.mRight}" min="0" /></label>
+            </div>
+
+            <div style="font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-top:6px;">Spacing between cells</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <label>H gap <input type="number" id="gapH" value="${guess.gapH}" min="0" /></label>
+              <label>V gap <input type="number" id="gapV" value="${guess.gapV}" min="0" /></label>
+            </div>
+
+            <button class="panel-btn" id="splitAuto" style="margin-top:6px;">🪄 Auto-detect all</button>
+            <div class="info" id="splitInfo"></div>
+
+            <label class="inline" style="margin-top:6px;">
+              <input type="checkbox" id="splitKeepOriginal" checked />
+              Keep original file in queue (recommended — lets you re-split later)
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="panel-actions">
+        <button class="panel-btn primary" id="splitGo">✂ Split into <span id="splitCount">0</span> frames</button>
+        <button class="panel-btn" id="splitCancel">Cancel</button>
+      </div>
+    </div>
+  `, 'splitter');
+
+  if (hasChildren) {
+    $('splitRemoveOldChildren').addEventListener('click', () => {
+      for (const child of existingChildren) removeFile(child.id);
+      setStatus('idle', `Removed ${existingChildren.length} old frame${existingChildren.length>1?'s':''}.`);
+      // Re-open splitter to refresh banner state
+      closePanel();
+      setTimeout(() => openSplitter(fileId), 50);
+    });
+  }
+
+  const canvas = $('splitCanvas');
+  canvas.width = cv.width;
+  canvas.height = cv.height;
+
+  const drawPreview = () => {
+    const cols = +$('splitCols').value;
+    const rows = +$('splitRows').value;
+    const mT = +$('mTop').value, mL = +$('mLeft').value;
+    const mB = +$('mBottom').value, mR = +$('mRight').value;
+    const gH = +$('gapH').value, gV = +$('gapV').value;
+
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(cv, 0, 0);
+
+    // Compute content area
+    const cw = cv.width - mL - mR;
+    const ch = cv.height - mT - mB;
+    const cellW = cols > 0 ? Math.floor((cw - (cols - 1) * gH) / cols) : 0;
+    const cellH = rows > 0 ? Math.floor((ch - (rows - 1) * gV) / rows) : 0;
+
+    if (cellW <= 0 || cellH <= 0) {
+      $('splitInfo').textContent = '⚠ Invalid: cell size becomes ≤ 0. Reduce margins/gaps or rows/cols.';
+      $('splitInfo').style.color = 'var(--danger)';
+      $('splitGo').disabled = true;
+      $('splitCount').textContent = '?';
+      return;
+    }
+
+    $('splitInfo').style.color = 'var(--accent3)';
+    $('splitGo').disabled = false;
+
+    // Dim the margin areas
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    if (mT > 0) ctx.fillRect(0, 0, cv.width, mT);
+    if (mB > 0) ctx.fillRect(0, cv.height - mB, cv.width, mB);
+    if (mL > 0) ctx.fillRect(0, mT, mL, cv.height - mT - mB);
+    if (mR > 0) ctx.fillRect(cv.width - mR, mT, mR, cv.height - mT - mB);
+
+    // Dim the gaps between cells
+    ctx.fillStyle = 'rgba(239,68,68,0.35)';
+    for (let i = 1; i < cols; i++) {
+      const x = mL + i * cellW + (i - 1) * gH;
+      if (gH > 0) ctx.fillRect(x, mT, gH, ch);
+    }
+    for (let i = 1; i < rows; i++) {
+      const y = mT + i * cellH + (i - 1) * gV;
+      if (gV > 0) ctx.fillRect(mL, y, cw, gV);
+    }
+
+    // Draw cell rectangles + numbers
+    const lineW = Math.max(1, Math.round(cv.width / 600));
+    ctx.lineWidth = lineW;
+    ctx.font = `bold ${Math.max(12, Math.round(cellH / 8))}px monospace`;
+    ctx.textBaseline = 'top';
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = mL + c * (cellW + gH);
+        const y = mT + r * (cellH + gV);
+        const idx = r * cols + c;
+
+        // First cell highlighted
+        if (idx === 0) {
+          ctx.strokeStyle = 'rgba(34,197,94,1)';
+          ctx.lineWidth = lineW * 2;
+          ctx.fillStyle = 'rgba(34,197,94,0.18)';
+          ctx.fillRect(x, y, cellW, cellH);
+        } else {
+          ctx.strokeStyle = 'rgba(245,158,11,0.95)';
+          ctx.lineWidth = lineW;
+        }
+        ctx.strokeRect(x, y, cellW, cellH);
+
+        // Frame number in corner
+        ctx.fillStyle = idx === 0 ? 'rgba(34,197,94,1)' : 'rgba(245,158,11,0.85)';
+        ctx.fillText(`${idx + 1}`, x + 4, y + 4);
+      }
+    }
+
+    $('splitInfo').textContent = `${cols}×${rows} = ${cols * rows} frames · cell ${cellW}×${cellH}px · content ${cw}×${ch}`;
+    $('splitCount').textContent = cols * rows;
+  };
+
+  drawPreview();
+
+  ['splitCols','splitRows','mTop','mLeft','mBottom','mRight','gapH','gapV'].forEach(id => {
+    $(id).addEventListener('input', drawPreview);
+  });
+
+  $('splitAuto').addEventListener('click', () => {
+    const g = autoDetectGrid(cv);
+    $('splitCols').value = g.cols;
+    $('splitRows').value = g.rows;
+    $('mTop').value = g.mTop;
+    $('mLeft').value = g.mLeft;
+    $('mBottom').value = g.mBottom;
+    $('mRight').value = g.mRight;
+    $('gapH').value = g.gapH;
+    $('gapV').value = g.gapV;
+    drawPreview();
+  });
+
+  $('splitClose').addEventListener('click', closePanel);
+  $('splitCancel').addEventListener('click', closePanel);
+  $('splitGo').addEventListener('click', async () => {
+    const cols = +$('splitCols').value, rows = +$('splitRows').value;
+    const mT = +$('mTop').value, mL = +$('mLeft').value;
+    const mB = +$('mBottom').value, mR = +$('mRight').value;
+    const gH = +$('gapH').value, gV = +$('gapV').value;
+    const keep = $('splitKeepOriginal').checked;
+    await applySplit(f, cv, { cols, rows, mT, mL, mB, mR, gH, gV }, keep);
+    closePanel();
+  });
+}
+
+function autoDetectGrid(cv) {
+  // Build column / row fill profiles
+  const ctx = cv.getContext('2d');
+  const id = ctx.getImageData(0, 0, cv.width, cv.height);
+  const d = id.data;
+  const w = cv.width, h = cv.height;
+
+  const colFill = new Array(w).fill(0);
+  const rowFill = new Array(h).fill(0);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (d[(y*w + x)*4 + 3] > 10) {
+        colFill[x]++; rowFill[y]++;
+      }
+    }
+  }
+
+  // Margins: first/last column or row that has any non-transparent pixel
+  const firstNonZero = arr => { for (let i = 0; i < arr.length; i++) if (arr[i] > 0) return i; return 0; };
+  const lastNonZero  = arr => { for (let i = arr.length - 1; i >= 0; i--) if (arr[i] > 0) return i; return arr.length - 1; };
+
+  const left = firstNonZero(colFill);
+  const right = lastNonZero(colFill);
+  const top = firstNonZero(rowFill);
+  const bottom = lastNonZero(rowFill);
+
+  // Within content area, count segments (frames separated by empty space)
+  const colSeg = colFill.slice(left, right + 1);
+  const rowSeg = rowFill.slice(top, bottom + 1);
+  const cols = Math.max(1, countSegments(colSeg));
+  const rows = Math.max(1, countSegments(rowSeg));
+
+  // Estimate gap = median empty run between segments
+  const gapH = medianGap(colSeg);
+  const gapV = medianGap(rowSeg);
+
+  return {
+    cols, rows,
+    mTop: top, mLeft: left,
+    mBottom: Math.max(0, h - 1 - bottom),
+    mRight: Math.max(0, w - 1 - right),
+    gapH, gapV,
+  };
+}
+
+function countSegments(arr) {
+  let count = 0, inSeg = false;
+  for (const v of arr) {
+    if (v > 0 && !inSeg) { count++; inSeg = true; }
+    else if (v === 0) inSeg = false;
+  }
+  return count;
+}
+function medianGap(arr) {
+  const gaps = [];
+  let runLen = 0, sawSeg = false;
+  for (const v of arr) {
+    if (v === 0) {
+      if (sawSeg) runLen++;
+    } else {
+      if (runLen > 0) gaps.push(runLen);
+      runLen = 0;
+      sawSeg = true;
+    }
+  }
+  if (gaps.length === 0) return 0;
+  gaps.sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)];
+}
+
+async function applySplit(srcFile, srcCanvas, opts, keepOriginal) {
+  const { cols, rows, mT, mL, mB, mR, gH, gV } = opts;
+  const cw = srcCanvas.width - mL - mR;
+  const ch = srcCanvas.height - mT - mB;
+  const cellW = Math.floor((cw - (cols - 1) * gH) / cols);
+  const cellH = Math.floor((ch - (rows - 1) * gV) / rows);
+
+  if (cellW <= 0 || cellH <= 0) {
+    setStatus('error', 'Cannot split — cell size invalid.');
+    return;
+  }
+
+  const baseName = srcFile.name.replace(/\.[^.]+$/, '');
+  const newFiles = [];
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const sx = mL + c * (cellW + gH);
+      const sy = mT + r * (cellH + gV);
+      const tmp = document.createElement('canvas');
+      tmp.width = cellW; tmp.height = cellH;
+      const tctx = tmp.getContext('2d');
+      tctx.imageSmoothingEnabled = false;
+      tctx.drawImage(srcCanvas, sx, sy, cellW, cellH, 0, 0, cellW, cellH);
+      const bytes = await canvasToBytes(tmp);
+      const idx = String(r * cols + c + 1).padStart(2, '0');
+      newFiles.push({ name: `${baseName}_frame_${idx}.png`, bytes });
+    }
+  }
+
+  const remaining = MAX_FILES - files.length - (keepOriginal ? 0 : -1);
+  const toAdd = newFiles.slice(0, remaining);
+
+  if (!keepOriginal) removeFile(srcFile.id);
+
+  for (const nf of toAdd) {
+    if (files.length >= MAX_FILES) break;
+    const blob = new Blob([nf.bytes], { type: 'image/png' });
+    files.push({
+      id: nextId++,
+      name: nf.name,
+      size: nf.bytes.length,
+      bytes: nf.bytes,
+      beforeUrl: URL.createObjectURL(blob),
+      resultBytes: null, resultUrl: null,
+      status: 'pending', stats: null,
+      parentId: keepOriginal ? srcFile.id : null, // track origin
+    });
+  }
+  setStatus('success', `Split into ${toAdd.length} frame${toAdd.length > 1 ? 's' : ''}.`);
+  hideSheetBanner();
+  updateDropUI();
+  render();
+}
+
+// ─── PACKER ──────────────────────────────────────────────────────────────
+$('packBtn').addEventListener('click', () => openPacker());
+
+async function openPacker() {
+  const done = files.filter(f => f.status === 'done');
+  if (done.length === 0) return;
+
+  openPanel(`
+    <div class="panel">
+      <div class="panel-header">
+        <h3>🧱 Sprite Sheet Packer <small>${done.length} frames</small></h3>
+        <button class="icon-btn" id="packClose">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="panel-grid-2">
+          <div class="splitter-canvas-wrap"><canvas id="packCanvas"></canvas></div>
+          <div class="panel-form">
+            <label>Layout
+              <select id="packLayout">
+                <option value="hstrip">Horizontal strip (1 row)</option>
+                <option value="vstrip">Vertical strip (1 col)</option>
+                <option value="grid-auto" selected>Grid (auto cols)</option>
+                <option value="grid-custom">Grid (custom cols)</option>
+              </select>
+            </label>
+            <label>Custom columns <input type="number" id="packCols" value="4" min="1" max="32" /></label>
+            <label>Padding (px) <input type="number" id="packPad" value="0" min="0" max="8" /></label>
+            <label>JSON metadata
+              <select id="packFormat">
+                <option value="generic">Generic JSON</option>
+                <option value="texturepacker">TexturePacker</option>
+                <option value="aseprite">Aseprite-style</option>
+                <option value="none">None (PNG only)</option>
+              </select>
+            </label>
+            <div class="info" id="packInfo">…</div>
+          </div>
+        </div>
+      </div>
+      <div class="panel-actions">
+        <button class="panel-btn primary" id="packDownload">⬇ Download sheet</button>
+        <button class="panel-btn" id="packCancel">Cancel</button>
+      </div>
+    </div>
+  `, 'packer');
+
+  const frames = await Promise.all(done.map(async f => ({ name: f.name, canvas: await bytesToCanvas(f.resultBytes) })));
+
+  const buildSheet = () => {
+    const layout = $('packLayout').value;
+    const customCols = +$('packCols').value;
+    const padding = +$('packPad').value;
+
+    // Determine cell size = max of all frames
+    const cellW = Math.max(...frames.map(f => f.canvas.width));
+    const cellH = Math.max(...frames.map(f => f.canvas.height));
+
+    let cols, rows;
+    if (layout === 'hstrip') { cols = frames.length; rows = 1; }
+    else if (layout === 'vstrip') { cols = 1; rows = frames.length; }
+    else if (layout === 'grid-custom') { cols = customCols; rows = Math.ceil(frames.length / cols); }
+    else { cols = Math.ceil(Math.sqrt(frames.length)); rows = Math.ceil(frames.length / cols); }
+
+    const sheetW = cols * cellW + (cols + 1) * padding;
+    const sheetH = rows * cellH + (rows + 1) * padding;
+
+    const cv = $('packCanvas');
+    cv.width = sheetW;
+    cv.height = sheetH;
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, sheetW, sheetH);
+
+    const meta = [];
+    for (let i = 0; i < frames.length; i++) {
+      const c = i % cols, r = Math.floor(i / cols);
+      const x = padding + c * (cellW + padding);
+      const y = padding + r * (cellH + padding);
+      // Center the frame within the cell
+      const cw = frames[i].canvas.width;
+      const ch = frames[i].canvas.height;
+      const dx = x + Math.floor((cellW - cw) / 2);
+      const dy = y + Math.floor((cellH - ch) / 2);
+      ctx.drawImage(frames[i].canvas, dx, dy);
+      meta.push({ name: frames[i].name, x: dx, y: dy, w: cw, h: ch });
+    }
+    $('packInfo').textContent = `Output: ${sheetW}×${sheetH} · ${cols}×${rows} grid · cell ${cellW}×${cellH}`;
+    return { canvas: cv, meta, cols, rows, cellW, cellH };
+  };
+
+  let sheet = buildSheet();
+
+  $('packLayout').addEventListener('change', () => sheet = buildSheet());
+  $('packCols').addEventListener('input', () => sheet = buildSheet());
+  $('packPad').addEventListener('input', () => sheet = buildSheet());
+
+  $('packClose').addEventListener('click', closePanel);
+  $('packCancel').addEventListener('click', closePanel);
+
+  $('packDownload').addEventListener('click', async () => {
+    sheet = buildSheet();
+    const fmt = $('packFormat').value;
+    const sheetBlob = await new Promise(res => sheet.canvas.toBlob(res, 'image/png'));
+    const sheetBytes = new Uint8Array(await sheetBlob.arrayBuffer());
+
+    if (fmt === 'none') {
+      triggerDownload(URL.createObjectURL(sheetBlob), `tachi-spritesheet-${Date.now()}.png`);
+      return;
+    }
+    // Build JSON
+    const json = buildAtlasJson(fmt, sheet, `tachi-spritesheet-${Date.now()}.png`);
+    const zip = new JSZip();
+    zip.file(`tachi-spritesheet-${Date.now()}.png`, sheetBytes);
+    zip.file(`tachi-spritesheet-${Date.now()}.json`, JSON.stringify(json, null, 2));
+    const blob = await zip.generateAsync({ type: 'blob' });
+    triggerDownload(URL.createObjectURL(blob), `tachi-spritesheet-${Date.now()}.zip`);
+    setStatus('success', `Sprite sheet exported (${frames.length} frames + ${fmt} JSON).`);
+  });
+}
+
+function buildAtlasJson(format, sheet, imgName) {
+  const { meta, canvas, cols, rows, cellW, cellH } = sheet;
+  const sheetW = canvas.width, sheetH = canvas.height;
+  if (format === 'texturepacker') {
+    // {"frames": {"name.png": {"frame":{x,y,w,h}, ...}}, "meta": {...}}
+    const frames = {};
+    for (const m of meta) {
+      frames[m.name] = {
+        frame: { x: m.x, y: m.y, w: m.w, h: m.h },
+        rotated: false, trimmed: false,
+        spriteSourceSize: { x:0, y:0, w: m.w, h: m.h },
+        sourceSize: { w: m.w, h: m.h },
+      };
+    }
+    return {
+      frames,
+      meta: { app: 'TachiPixels', version: '0.4.0', image: imgName, format: 'RGBA8888', size: { w: sheetW, h: sheetH }, scale: '1' }
+    };
+  }
+  if (format === 'aseprite') {
+    return {
+      frames: meta.map((m, i) => ({
+        filename: m.name,
+        frame: { x: m.x, y: m.y, w: m.w, h: m.h },
+        duration: 100,
+      })),
+      meta: { app: 'TachiPixels', version: '0.4.0', image: imgName, format: 'RGBA8888', size: { w: sheetW, h: sheetH }, scale: '1', frameTags: [] }
+    };
+  }
+  // generic
+  return {
+    image: imgName,
+    sheet: { width: sheetW, height: sheetH },
+    grid: { cols, rows, cellW, cellH },
+    frames: meta,
+  };
+}
+
+// ─── ANIMATOR ────────────────────────────────────────────────────────────
+$('animateBtn').addEventListener('click', () => openAnimator());
+
+async function openAnimator() {
+  const done = files.filter(f => f.status === 'done');
+  if (done.length < 2) return;
+
+  // Frames in order of files
+  let order = done.map(f => f.id);
+
+  openPanel(`
+    <div class="panel">
+      <div class="panel-header">
+        <h3>🎞 Animator <small>${done.length} frames</small></h3>
+        <button class="icon-btn" id="animClose">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="panel-grid-2">
+          <div>
+            <div style="font-size:10px; color:var(--muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:.08em;">Frames (drag to reorder)</div>
+            <div class="frame-list" id="frameList"></div>
+          </div>
+          <div class="panel-form">
+            <div class="anim-preview-wrap">
+              <canvas id="animPreview" width="200" height="200"></canvas>
+              <div class="anim-info" id="animInfo">—</div>
+            </div>
+            <label>FPS: <strong id="fpsVal">8</strong>
+              <input type="range" id="animFps" min="1" max="30" value="8" />
+            </label>
+            <label class="inline">
+              <input type="checkbox" id="pingPong" />
+              Ping-pong loop (1→N→1)
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="panel-actions">
+        <button class="panel-btn primary" id="animGif">⬇ Export GIF</button>
+        <button class="panel-btn" id="animSheet">⬇ As sprite-sheet strip</button>
+        <button class="panel-btn" id="animCancel">Cancel</button>
+      </div>
+    </div>
+  `, 'animator');
+
+  const frameList = $('frameList');
+  const renderFrames = () => {
+    frameList.innerHTML = '';
+    order.forEach((id, idx) => {
+      const f = files.find(x => x.id === id);
+      if (!f) return;
+      const div = document.createElement('div');
+      div.className = 'frame-thumb';
+      div.draggable = true;
+      div.dataset.id = id;
+      div.innerHTML = `<img src="${f.resultUrl}" /><div class="idx">${idx+1}</div><div class="x" data-remove="${id}">✕</div>`;
+      frameList.appendChild(div);
+    });
+    bindDragReorder();
+  };
+
+  let dragId = null;
+  function bindDragReorder() {
+    frameList.querySelectorAll('.frame-thumb').forEach(el => {
+      el.addEventListener('dragstart', e => {
+        dragId = +el.dataset.id;
+        el.classList.add('dragging');
+      });
+      el.addEventListener('dragend', () => el.classList.remove('dragging'));
+      el.addEventListener('dragover', e => { e.preventDefault(); });
+      el.addEventListener('drop', e => {
+        e.preventDefault();
+        const targetId = +el.dataset.id;
+        if (dragId === null || dragId === targetId) return;
+        const fromIdx = order.indexOf(dragId);
+        const toIdx = order.indexOf(targetId);
+        order.splice(fromIdx, 1);
+        order.splice(toIdx, 0, dragId);
+        renderFrames();
+        startPreview();
+      });
+    });
+    frameList.querySelectorAll('[data-remove]').forEach(x => {
+      x.addEventListener('click', e => {
+        e.stopPropagation();
+        const id = +x.dataset.remove;
+        order = order.filter(o => o !== id);
+        if (order.length < 2) { closePanel(); return; }
+        renderFrames();
+        startPreview();
+      });
+    });
+  }
+
+  // Live preview animation
+  let previewRaf = null;
+  let previewIdx = 0;
+  let previewLast = 0;
+  let previewDir = 1;
+
+  const previewCanvas = $('animPreview');
+  const previewCtx = previewCanvas.getContext('2d');
+  previewCtx.imageSmoothingEnabled = false;
+
+  let cachedImgs = [];
+  async function loadCache() {
+    cachedImgs = await Promise.all(order.map(id => {
+      const f = files.find(x => x.id === id);
+      return loadImage(f.resultUrl);
+    }));
+  }
+
+  function startPreview() {
+    if (previewRaf) cancelAnimationFrame(previewRaf);
+    previewIdx = 0; previewLast = 0; previewDir = 1;
+    loadCache().then(() => {
+      const fps = +$('animFps').value;
+      const ping = $('pingPong').checked;
+      const frameDur = 1000 / fps;
+      const w = Math.max(...cachedImgs.map(i => i.naturalWidth));
+      const h = Math.max(...cachedImgs.map(i => i.naturalHeight));
+      // Fit canvas
+      const max = 200;
+      const scale = Math.min(max / w, max / h, 8);
+      previewCanvas.width = Math.floor(w * scale);
+      previewCanvas.height = Math.floor(h * scale);
+      $('animInfo').textContent = `${w}×${h} · ${fps} FPS · ${cachedImgs.length} frames${ping ? ' · ping-pong' : ''}`;
+
+      const tick = (t) => {
+        if (!previewLast) previewLast = t;
+        if (t - previewLast >= frameDur) {
+          previewLast = t;
+          if (ping && cachedImgs.length > 1) {
+            previewIdx += previewDir;
+            if (previewIdx >= cachedImgs.length - 1) previewDir = -1;
+            else if (previewIdx <= 0) previewDir = 1;
+          } else {
+            previewIdx = (previewIdx + 1) % cachedImgs.length;
+          }
+        }
+        previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+        const img = cachedImgs[previewIdx];
+        const dx = Math.floor((previewCanvas.width - img.naturalWidth * scale) / 2);
+        const dy = Math.floor((previewCanvas.height - img.naturalHeight * scale) / 2);
+        previewCtx.drawImage(img, dx, dy, img.naturalWidth * scale, img.naturalHeight * scale);
+        previewRaf = requestAnimationFrame(tick);
+      };
+      previewRaf = requestAnimationFrame(tick);
+    });
+  }
+
+  renderFrames();
+  startPreview();
+
+  $('animFps').addEventListener('input', () => {
+    $('fpsVal').textContent = $('animFps').value;
+    startPreview();
+  });
+  $('pingPong').addEventListener('change', startPreview);
+
+  $('animClose').addEventListener('click', () => { if (previewRaf) cancelAnimationFrame(previewRaf); closePanel(); });
+  $('animCancel').addEventListener('click', () => { if (previewRaf) cancelAnimationFrame(previewRaf); closePanel(); });
+
+  $('animGif').addEventListener('click', async () => {
+    const fps = +$('animFps').value;
+    const ping = $('pingPong').checked;
+    await exportGif(order, fps, ping);
+  });
+  $('animSheet').addEventListener('click', async () => {
+    const fps = +$('animFps').value;
+    await exportAnimSheet(order);
+  });
+}
+
+async function exportGif(order, fps, pingPong) {
+  if (typeof GIF === 'undefined') {
+    setStatus('error', 'GIF library not loaded.');
+    return;
+  }
+  setStatus('loading', 'Encoding GIF…');
+
+  const imgs = await Promise.all(order.map(id => {
+    const f = files.find(x => x.id === id);
+    return loadImage(f.resultUrl);
+  }));
+
+  const w = Math.max(...imgs.map(i => i.naturalWidth));
+  const h = Math.max(...imgs.map(i => i.naturalHeight));
+
+  const gif = new GIF({
+    workers: 2,
+    quality: 1,
+    width: w,
+    height: h,
+    workerScript: 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js',
+    transparent: 0x00000000,
+  });
+
+  const delay = Math.round(1000 / fps);
+
+  const sequence = pingPong && imgs.length > 1
+    ? [...imgs, ...imgs.slice(1, -1).reverse()]
+    : imgs;
+
+  for (const img of sequence) {
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    const dx = Math.floor((w - img.naturalWidth) / 2);
+    const dy = Math.floor((h - img.naturalHeight) / 2);
+    ctx.drawImage(img, dx, dy);
+    gif.addFrame(cv, { delay, copy: true });
+  }
+
+  gif.on('progress', p => setStatus('loading', `Encoding GIF… ${Math.round(p*100)}%`));
+  gif.on('finished', blob => {
+    triggerDownload(URL.createObjectURL(blob), `tachi-animation-${Date.now()}.gif`);
+    setStatus('success', `GIF exported (${sequence.length} frames @ ${fps} FPS).`);
+  });
+  gif.render();
+}
+
+async function exportAnimSheet(order) {
+  const cvs = await Promise.all(order.map(id => {
+    const f = files.find(x => x.id === id);
+    return bytesToCanvas(f.resultBytes);
+  }));
+  const cellW = Math.max(...cvs.map(c => c.width));
+  const cellH = Math.max(...cvs.map(c => c.height));
+  const sheet = document.createElement('canvas');
+  sheet.width = cellW * cvs.length;
+  sheet.height = cellH;
+  const ctx = sheet.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  cvs.forEach((c, i) => {
+    const dx = i * cellW + Math.floor((cellW - c.width) / 2);
+    const dy = Math.floor((cellH - c.height) / 2);
+    ctx.drawImage(c, dx, dy);
+  });
+  sheet.toBlob(blob => {
+    triggerDownload(URL.createObjectURL(blob), `tachi-animation-strip-${Date.now()}.png`);
+    setStatus('success', `Animation strip exported (${cvs.length} frames).`);
+  }, 'image/png');
+}
+
+// ─── Magnifier ───────────────────────────────────────────────────────────
+const ZOOM = 6, LENS = 140;
+function attachMagnifier(wrap, imgEl) {
+  const lens = wrap.querySelector('.magnifier');
+  if (!lens) return;
+  function onMove(e) {
+    if (!imgEl.naturalWidth) return;
+    const wRect = wrap.getBoundingClientRect();
+    const iRect = imgEl.getBoundingClientRect();
+    const half = LENS / 2;
+    const mx = e.clientX - wRect.left;
+    const my = e.clientY - wRect.top;
+    const lx = Math.max(half, Math.min(wRect.width - half, mx));
+    const ly = Math.max(half, Math.min(wRect.height - half, my));
+    lens.style.left = lx + 'px';
+    lens.style.top = ly + 'px';
+    const imgX = (e.clientX - iRect.left) * (imgEl.naturalWidth / iRect.width);
+    const imgY = (e.clientY - iRect.top) * (imgEl.naturalHeight / iRect.height);
+    const bgW = imgEl.naturalWidth * ZOOM;
+    const bgH = imgEl.naturalHeight * ZOOM;
+    const bgX = -(imgX * ZOOM - half);
+    const bgY = -(imgY * ZOOM - half);
+    lens.style.backgroundImage = `url('${imgEl.src}')`;
+    lens.style.backgroundSize = `${bgW}px ${bgH}px`;
+    lens.style.backgroundPosition = `${bgX}px ${bgY}px`;
+  }
+  wrap.addEventListener('mouseenter', () => { lens.style.display = 'block'; });
+  wrap.addEventListener('mouseleave', () => { lens.style.display = 'none'; });
+  wrap.addEventListener('mousemove', onMove);
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
 function setStatus(type, msg) {
-  statusBar.className = 'status-bar ' + type;
-  statusText.textContent = msg;
+  $('statusBar').className = 'status-bar ' + type;
+  $('statusText').textContent = msg;
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeAttr(s) { return String(s).replace(/[^a-z0-9_-]/gi, '_'); }
+function triggerDownload(url, name) {
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 </script>
 </body>

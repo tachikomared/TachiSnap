@@ -1,15 +1,14 @@
+#![allow(dead_code)]
+
 use image::{GenericImageView, ImageBuffer, Rgba, RgbaImage};
 use rand::prelude::*;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, WeightedIndex};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
-
-#[cfg(not(target_arch = "wasm32"))]
-use std::env;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -34,9 +33,7 @@ pub struct Config {
     min_cuts_per_axis: usize,
     fallback_target_segments: usize,
     max_step_ratio: f64,
-    /// NEW: if >0 forces this pixel size instead of auto-detecting
     pub forced_pixel_size: usize,
-    /// NEW: upscale output by this factor (1 = no upscale)
     pub upscale_factor: usize,
 }
 
@@ -47,7 +44,7 @@ impl Default for Config {
             k_seed: 42,
             input_path: String::new(),
             output_path: String::new(),
-            max_kmeans_iterations: 15,
+            max_kmeans_iterations: 25,
             peak_threshold_multiplier: 0.2,
             peak_distance_filter: 4,
             walker_search_window_ratio: 0.35,
@@ -100,8 +97,6 @@ type Result<T> = std::result::Result<T, PixelSnapperError>;
 
 // ─── WASM public API ────────────────────────────────────────────────────────
 
-/// Returns the detected pixel size without processing the image.
-/// Useful for showing the user what grid was found.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn detect_pixel_size(input_bytes: &[u8]) -> std::result::Result<u32, wasm_bindgen::JsValue> {
@@ -111,7 +106,8 @@ pub fn detect_pixel_size(input_bytes: &[u8]) -> std::result::Result<u32, wasm_bi
     validate_image_dimensions(width, height)?;
     let rgba_img = img.to_rgba8();
     let quantized = quantize_image(&rgba_img, &config)?;
-    let (px, py) = compute_profiles(&quantized)?;
+    let bg = Some(detect_background_color(&quantized));
+    let (px, py) = compute_profiles(&quantized, bg, 200)?;
     let sx = estimate_step_size(&px, &config);
     let sy = estimate_step_size(&py, &config);
     let (step_x, step_y) = resolve_step_sizes(sx, sy, width, height, &config);
@@ -120,9 +116,8 @@ pub fn detect_pixel_size(input_bytes: &[u8]) -> std::result::Result<u32, wasm_bi
 }
 
 /// Process image with full options.
-/// k_colors: palette size (default 16)
-/// forced_pixel_size: 0 = auto detect, >0 = use this exact pixel size
-/// upscale_factor: 1 = keep output small, 2/4/8 = upscale result
+/// remove_bg: auto-detect and remove background before snapping
+/// bg_tolerance: color distance tolerance for BG removal (0–80, default 20)
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn process_image(
@@ -130,6 +125,8 @@ pub fn process_image(
     k_colors: Option<u32>,
     forced_pixel_size: Option<u32>,
     upscale_factor: Option<u32>,
+    remove_bg: Option<bool>,
+    bg_tolerance: Option<u8>,
 ) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
     let mut config = Config::default();
 
@@ -146,106 +143,389 @@ pub fn process_image(
         config.upscale_factor = (uf as usize).max(1).min(16);
     }
 
-    process_image_bytes_common(input_bytes, Some(config))
+    let do_remove_bg = remove_bg.unwrap_or(false);
+    let tolerance = bg_tolerance.unwrap_or(20);
+
+    process_image_bytes_common(input_bytes, Some(config), do_remove_bg, tolerance)
         .map_err(|e| wasm_bindgen::JsValue::from(e))
+}
+
+/// Remove background from an image by flood-filling transparent from edges.
+/// Returns PNG bytes with background pixels set to alpha=0.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn remove_background(
+    input_bytes: &[u8],
+    tolerance: Option<u8>,
+) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
+    let img = image::load_from_memory(input_bytes).map_err(PixelSnapperError::from)?;
+    let (w, h) = img.dimensions();
+    validate_image_dimensions(w, h)?;
+    let mut rgba = img.to_rgba8();
+    let bg = detect_background_color(&rgba);
+    remove_background_flood(&mut rgba, bg, tolerance.unwrap_or(20));
+    let mut buf = Vec::new();
+    rgba.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .map_err(PixelSnapperError::ImageError)?;
+    Ok(buf)
+}
+
+/// Detect the sprite grid layout of a sprite sheet.
+/// Returns JSON: {"cols":4,"rows":2,"frame_w":32,"frame_h":32,"pixel_size":4,"sheet_w":128,"sheet_h":64}
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn detect_sprite_grid(
+    input_bytes: &[u8],
+) -> std::result::Result<String, wasm_bindgen::JsValue> {
+    let img = image::load_from_memory(input_bytes).map_err(PixelSnapperError::from)?;
+    let (w, h) = img.dimensions();
+    validate_image_dimensions(w, h)?;
+    let rgba = img.to_rgba8();
+    let config = Config::default();
+
+    let quantized = quantize_image(&rgba, &config)?;
+    let bg = Some(detect_background_color(&quantized));
+    let (px, py) = compute_profiles(&quantized, bg, 200)?;
+    let sx = estimate_step_size(&px, &config);
+    let sy = estimate_step_size(&py, &config);
+    let (step_x, step_y) = resolve_step_sizes(sx, sy, w, h, &config);
+
+    let cols = (w as f64 / step_x).round() as u32;
+    let rows = (h as f64 / step_y).round() as u32;
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    let frame_w = w / cols;
+    let frame_h = h / rows;
+    let pixel_size = ((step_x + step_y) / 2.0).round() as u32;
+
+    Ok(format!(
+        r#"{{"cols":{},"rows":{},"frame_w":{},"frame_h":{},"pixel_size":{},"sheet_w":{},"sheet_h":{}}}"#,
+        cols, rows, frame_w, frame_h, pixel_size, w, h
+    ))
+}
+
+/// Convert a sprite sheet to an animated GIF.
+/// Snaps each frame through the full pipeline, then encodes as animated GIF.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn spritesheet_to_gif(
+    input_bytes: &[u8],
+    cols: u32,
+    rows: u32,
+    fps: u32,
+    k_colors: Option<u32>,
+    forced_pixel_size: Option<u32>,
+    upscale_factor: Option<u32>,
+    remove_bg: Option<bool>,
+    bg_tolerance: Option<u8>,
+) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
+    let mut config = Config::default();
+    if let Some(k) = k_colors {
+        if k > 0 {
+            config.k_colors = k as usize;
+        }
+    }
+    if let Some(ps) = forced_pixel_size {
+        config.forced_pixel_size = ps as usize;
+    }
+    if let Some(uf) = upscale_factor {
+        config.upscale_factor = (uf as usize).max(1).min(16);
+    }
+
+    let do_remove_bg = remove_bg.unwrap_or(false);
+    let tolerance = bg_tolerance.unwrap_or(20);
+
+    let img = image::load_from_memory(input_bytes).map_err(PixelSnapperError::from)?;
+    let (w, h) = img.dimensions();
+    validate_image_dimensions(w, h)?;
+    let mut rgba = img.to_rgba8();
+
+    if do_remove_bg {
+        let bg = detect_background_color(&rgba);
+        remove_background_flood(&mut rgba, bg, tolerance);
+    }
+
+    let raw_frames =
+        split_spritesheet(&rgba, cols, rows).map_err(wasm_bindgen::JsValue::from)?;
+
+    let mut snapped_frames: Vec<RgbaImage> = Vec::with_capacity(raw_frames.len());
+    for frame in &raw_frames {
+        let snapped =
+            snap_frame(frame, &config).map_err(wasm_bindgen::JsValue::from)?;
+        snapped_frames.push(snapped);
+    }
+
+    frames_to_gif(&snapped_frames, fps, 0).map_err(wasm_bindgen::JsValue::from)
 }
 
 /// Returns the library version string.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn version() -> String {
-    "0.2.0".to_string()
+    "0.3.0".to_string()
 }
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
-fn main() -> Result<()> {
-    let config = parse_args().unwrap_or_default();
-    process_image_cli(&config)
+use clap::{Parser, Subcommand};
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Parser)]
+#[command(
+    name = "pixel-snapper",
+    version = "0.3.0",
+    about = "Snap AI-generated pixel art to a perfect grid"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+    /// Output JSON to stdout for agent/script use
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_args() -> Option<Config> {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: pixel-snapper <input> <output> [k_colors] [pixel_size] [upscale]");
-        return None;
+#[derive(Subcommand)]
+enum Commands {
+    /// Snap a single image to a pixel grid
+    Snap {
+        input: String,
+        output: String,
+        /// Palette size (number of colors)
+        #[arg(long, default_value_t = 16)]
+        k: usize,
+        /// Pixel size override (0 = auto-detect)
+        #[arg(long, default_value_t = 0)]
+        pixel_size: usize,
+        /// Upscale factor (1–16)
+        #[arg(long, default_value_t = 1)]
+        upscale: usize,
+        /// Auto-remove background
+        #[arg(long)]
+        remove_bg: bool,
+        /// Background removal tolerance (0–80)
+        #[arg(long, default_value_t = 20)]
+        bg_tolerance: u8,
+    },
+    /// Convert a sprite sheet to an animated GIF
+    Animate {
+        input: String,
+        output: String,
+        /// Number of columns in the sprite sheet
+        #[arg(long)]
+        cols: u32,
+        /// Number of rows in the sprite sheet
+        #[arg(long)]
+        rows: u32,
+        /// Frames per second
+        #[arg(long, default_value_t = 12)]
+        fps: u32,
+        /// Palette size per frame
+        #[arg(long, default_value_t = 16)]
+        k: usize,
+        /// Pixel size override (0 = auto-detect)
+        #[arg(long, default_value_t = 0)]
+        pixel_size: usize,
+        /// Upscale factor (1–16)
+        #[arg(long, default_value_t = 1)]
+        upscale: usize,
+        /// Auto-remove background
+        #[arg(long)]
+        remove_bg: bool,
+        /// Background removal tolerance (0–80)
+        #[arg(long, default_value_t = 20)]
+        bg_tolerance: u8,
+    },
+}
+
+fn main() {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let cli = Cli::parse();
+        if let Err(e) = run_cli(cli) {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
     }
-    let mut config = Config {
-        input_path: args[1].clone(),
-        output_path: args[2].clone(),
-        ..Default::default()
-    };
-    if let Some(k) = args.get(3).and_then(|s| s.parse::<usize>().ok()) {
-        if k > 0 { config.k_colors = k; }
-    }
-    if let Some(ps) = args.get(4).and_then(|s| s.parse::<usize>().ok()) {
-        config.forced_pixel_size = ps;
-    }
-    if let Some(uf) = args.get(5).and_then(|s| s.parse::<usize>().ok()) {
-        config.upscale_factor = uf.max(1).min(16);
-    }
-    Some(config)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn process_image_cli(config: &Config) -> Result<()> {
-    println!("Processing: {}", config.input_path);
-    let img_bytes = std::fs::read(&config.input_path).map_err(|e| {
-        PixelSnapperError::ProcessingError(format!("Failed to read input: {}", e))
-    })?;
-    let output_bytes = process_image_bytes_common(&img_bytes, Some(config.clone()))?;
-    std::fs::write(&config.output_path, output_bytes).map_err(|e| {
-        PixelSnapperError::ProcessingError(format!("Failed to write output: {}", e))
-    })?;
-    println!("Saved to: {}", config.output_path);
-    Ok(())
+fn run_cli(cli: Cli) -> Result<()> {
+    let use_json = cli.json;
+    match cli.command {
+        Commands::Snap {
+            input,
+            output,
+            k,
+            pixel_size,
+            upscale,
+            remove_bg,
+            bg_tolerance,
+        } => {
+            let mut config = Config {
+                input_path: input.clone(),
+                output_path: output.clone(),
+                ..Default::default()
+            };
+            if k > 0 {
+                config.k_colors = k;
+            }
+            config.forced_pixel_size = pixel_size;
+            config.upscale_factor = upscale.max(1).min(16);
+
+            if !use_json {
+                println!("Snapping: {}", input);
+            }
+
+            let t0 = std::time::Instant::now();
+            let img_bytes = std::fs::read(&input).map_err(|e| {
+                PixelSnapperError::ProcessingError(format!("Failed to read: {}", e))
+            })?;
+            let output_bytes =
+                process_image_bytes_common(&img_bytes, Some(config.clone()), remove_bg, bg_tolerance)?;
+
+            // Detect pixel size for reporting
+            let detected_px = {
+                let img = image::load_from_memory(&img_bytes)?;
+                let (w, h) = img.dimensions();
+                let rgba = img.to_rgba8();
+                let q = quantize_image(&rgba, &config)?;
+                let bg = Some(detect_background_color(&q));
+                let (px, py) = compute_profiles(&q, bg, 200)?;
+                let sx = estimate_step_size(&px, &config);
+                let sy = estimate_step_size(&py, &config);
+                let (sx, sy) = resolve_step_sizes(sx, sy, w, h, &config);
+                ((sx + sy) / 2.0).round() as u32
+            };
+
+            let out_img = image::load_from_memory(&output_bytes)?;
+            let (ow, oh) = out_img.dimensions();
+            let elapsed = t0.elapsed().as_millis();
+
+            std::fs::write(&output, &output_bytes).map_err(|e| {
+                PixelSnapperError::ProcessingError(format!("Failed to write: {}", e))
+            })?;
+
+            if use_json {
+                println!(
+                    r#"{{"status":"ok","output":"{}","pixel_size":{},"output_w":{},"output_h":{},"elapsed_ms":{}}}"#,
+                    output, detected_px, ow, oh, elapsed
+                );
+            } else {
+                println!(
+                    "Done: {} → {} ({}×{}, pixel size {}px, {}ms)",
+                    input, output, ow, oh, detected_px, elapsed
+                );
+            }
+            Ok(())
+        }
+
+        Commands::Animate {
+            input,
+            output,
+            cols,
+            rows,
+            fps,
+            k,
+            pixel_size,
+            upscale,
+            remove_bg,
+            bg_tolerance,
+        } => {
+            let mut config = Config {
+                input_path: input.clone(),
+                output_path: output.clone(),
+                ..Default::default()
+            };
+            if k > 0 {
+                config.k_colors = k;
+            }
+            config.forced_pixel_size = pixel_size;
+            config.upscale_factor = upscale.max(1).min(16);
+
+            if !use_json {
+                println!("Animating: {} ({}×{} grid, {}fps)", input, cols, rows, fps);
+            }
+
+            let t0 = std::time::Instant::now();
+            let img_bytes = std::fs::read(&input).map_err(|e| {
+                PixelSnapperError::ProcessingError(format!("Failed to read: {}", e))
+            })?;
+
+            let img = image::load_from_memory(&img_bytes)?;
+            let (w, h) = img.dimensions();
+            validate_image_dimensions(w, h)?;
+            let mut rgba = img.to_rgba8();
+
+            if remove_bg {
+                let bg = detect_background_color(&rgba);
+                remove_background_flood(&mut rgba, bg, bg_tolerance);
+            }
+
+            let raw_frames = split_spritesheet(&rgba, cols, rows)?;
+            let frame_count = raw_frames.len();
+
+            let mut snapped_frames: Vec<RgbaImage> = Vec::with_capacity(frame_count);
+            for frame in &raw_frames {
+                snapped_frames.push(snap_frame(frame, &config)?);
+            }
+
+            let gif_bytes = frames_to_gif(&snapped_frames, fps, 0)?;
+            let elapsed = t0.elapsed().as_millis();
+
+            std::fs::write(&output, &gif_bytes).map_err(|e| {
+                PixelSnapperError::ProcessingError(format!("Failed to write: {}", e))
+            })?;
+
+            let (fw, fh) = snapped_frames[0].dimensions();
+
+            if use_json {
+                println!(
+                    r#"{{"status":"ok","output":"{}","frames":{},"frame_w":{},"frame_h":{},"fps":{},"size_bytes":{},"elapsed_ms":{}}}"#,
+                    output, frame_count, fw, fh, fps, gif_bytes.len(), elapsed
+                );
+            } else {
+                println!(
+                    "Done: {} → {} ({} frames, {}×{}px, {}fps, {}KB, {}ms)",
+                    input,
+                    output,
+                    frame_count,
+                    fw,
+                    fh,
+                    fps,
+                    gif_bytes.len() / 1024,
+                    elapsed
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 // ─── Core pipeline ──────────────────────────────────────────────────────────
 
-fn process_image_bytes_common(input_bytes: &[u8], config: Option<Config>) -> Result<Vec<u8>> {
+fn process_image_bytes_common(
+    input_bytes: &[u8],
+    config: Option<Config>,
+    remove_bg: bool,
+    bg_tolerance: u8,
+) -> Result<Vec<u8>> {
     let config = config.unwrap_or_default();
 
     let img = image::load_from_memory(input_bytes)?;
     let (width, height) = img.dimensions();
     validate_image_dimensions(width, height)?;
 
-    let rgba_img = img.to_rgba8();
-    let quantized_img = quantize_image(&rgba_img, &config)?;
-    let (profile_x, profile_y) = compute_profiles(&quantized_img)?;
+    let mut rgba_img = img.to_rgba8();
 
-    let (step_x, step_y) = if config.forced_pixel_size > 0 {
-        let s = config.forced_pixel_size as f64;
-        (s, s)
-    } else {
-        let sx = estimate_step_size(&profile_x, &config);
-        let sy = estimate_step_size(&profile_y, &config);
-        resolve_step_sizes(sx, sy, width, height, &config)
-    };
+    // Step 0: background removal before quantization
+    if remove_bg {
+        let bg = detect_background_color(&rgba_img);
+        remove_background_flood(&mut rgba_img, bg, bg_tolerance);
+    }
 
-    let raw_col_cuts = walk(&profile_x, step_x, width as usize, &config)?;
-    let raw_row_cuts = walk(&profile_y, step_y, height as usize, &config)?;
-
-    let (col_cuts, row_cuts) = stabilize_both_axes(
-        &profile_x,
-        &profile_y,
-        raw_col_cuts,
-        raw_row_cuts,
-        width as usize,
-        height as usize,
-        &config,
-    );
-
-    let output_img = resample(&quantized_img, &col_cuts, &row_cuts)?;
-
-    // Optional upscale
-    let final_img = if config.upscale_factor > 1 {
-        upscale_nearest(&output_img, config.upscale_factor)
-    } else {
-        output_img
-    };
+    let final_img = snap_frame(&rgba_img, &config)?;
 
     let mut output_bytes = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut output_bytes);
@@ -254,6 +534,133 @@ fn process_image_bytes_common(input_bytes: &[u8], config: Option<Config>) -> Res
         .map_err(PixelSnapperError::ImageError)?;
 
     Ok(output_bytes)
+}
+
+/// Run the full snap pipeline on a single frame/image.
+fn snap_frame(rgba_img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
+    let (width, height) = rgba_img.dimensions();
+    let quantized_img = quantize_image(rgba_img, config)?;
+
+    // Auto-detect background so gradient profiles ignore BG↔character edges.
+    // tol_sq=200 ≈ per-channel delta of ~8 after quantization — tight enough
+    // to match only the exact bg palette entry, not nearby character colors.
+    let bg_hint = Some(detect_background_color(&quantized_img));
+    let bg_tol_sq = 200u32;
+
+    let (profile_x, profile_y) = compute_profiles(&quantized_img, bg_hint, bg_tol_sq)?;
+
+    let (step_x, step_y) = if config.forced_pixel_size > 0 {
+        let s = config.forced_pixel_size as f64;
+        (s, s)
+    } else {
+        let sx = estimate_step_size(&profile_x, config);
+        let sy = estimate_step_size(&profile_y, config);
+        resolve_step_sizes(sx, sy, width, height, config)
+    };
+
+    let raw_col_cuts = walk(&profile_x, step_x, width as usize, config)?;
+    let raw_row_cuts = walk(&profile_y, step_y, height as usize, config)?;
+
+    let (col_cuts, row_cuts) = stabilize_both_axes(
+        &profile_x,
+        &profile_y,
+        raw_col_cuts,
+        raw_row_cuts,
+        width as usize,
+        height as usize,
+        config,
+    );
+
+    let output_img = resample(&quantized_img, &col_cuts, &row_cuts, bg_hint, bg_tol_sq)?;
+
+    let final_img = if config.upscale_factor > 1 {
+        upscale_nearest(&output_img, config.upscale_factor)
+    } else {
+        output_img
+    };
+
+    Ok(final_img)
+}
+
+// ─── CIELAB color space ──────────────────────────────────────────────────────
+
+#[inline]
+fn rgb_to_lab(r: f32, g: f32, b: f32) -> [f32; 3] {
+    // sRGB → linear (gamma expand)
+    fn lin(c: f32) -> f32 {
+        let c = c / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055_f32).powf(2.4)
+        }
+    }
+    let (rl, gl, bl) = (lin(r), lin(g), lin(b));
+
+    // sRGB (D65) → XYZ using IEC 61966-2-1 matrix
+    let x = 0.4124564 * rl + 0.3575761 * gl + 0.1804375 * bl;
+    let y = 0.2126729 * rl + 0.7151522 * gl + 0.0721750 * bl;
+    let z = 0.0193339 * rl + 0.1191920 * gl + 0.9503041 * bl;
+
+    // Normalize by D65 white point
+    let xn = x / 0.95047;
+    let yn = y / 1.00000;
+    let zn = z / 1.08883;
+
+    fn f(t: f32) -> f32 {
+        if t > 0.008856 {
+            t.powf(1.0 / 3.0)
+        } else {
+            7.787 * t + 16.0 / 116.0
+        }
+    }
+    let (fx, fy, fz) = (f(xn), f(yn), f(zn));
+
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+#[inline]
+fn lab_to_rgb(lab: &[f32; 3]) -> (u8, u8, u8) {
+    let fy = (lab[0] + 16.0) / 116.0;
+    let fx = lab[1] / 500.0 + fy;
+    let fz = fy - lab[2] / 200.0;
+
+    fn finv(t: f32) -> f32 {
+        let t3 = t * t * t;
+        if t3 > 0.008856 {
+            t3
+        } else {
+            (t - 16.0 / 116.0) / 7.787
+        }
+    }
+
+    let x = finv(fx) * 0.95047;
+    let y = finv(fy) * 1.00000;
+    let z = finv(fz) * 1.08883;
+
+    // XYZ → linear sRGB
+    let rl = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
+    let gl = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
+    let bl = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
+
+    fn gamma(c: f32) -> u8 {
+        let c = c.clamp(0.0, 1.0);
+        let g = if c <= 0.0031308 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (g * 255.0).round() as u8
+    }
+    (gamma(rl), gamma(gl), gamma(bl))
+}
+
+#[inline]
+fn lab_dist_sq(a: &[f32; 3], b: &[f32; 3]) -> f32 {
+    let dl = a[0] - b[0];
+    let da = a[1] - b[1];
+    let db = a[2] - b[2];
+    dl * dl + da * da + db * db
 }
 
 // ─── Upscale (nearest-neighbor) ─────────────────────────────────────────────
@@ -292,7 +699,7 @@ fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
     Ok(())
 }
 
-// ─── Color quantization (k-means++) ─────────────────────────────────────────
+// ─── Color quantization (k-means++ in CIELAB) ────────────────────────────────
 
 fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
     if config.k_colors == 0 {
@@ -301,13 +708,14 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
         ));
     }
 
+    // Collect opaque pixels as LAB values for perceptual quantization
     let opaque_pixels: Vec<[f32; 3]> = img
         .pixels()
         .filter_map(|p| {
             if p[3] == 0 {
                 None
             } else {
-                Some([p[0] as f32, p[1] as f32, p[2] as f32])
+                Some(rgb_to_lab(p[0] as f32, p[1] as f32, p[2] as f32))
             }
         })
         .collect();
@@ -320,13 +728,6 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
     let mut rng = ChaCha8Rng::seed_from_u64(config.k_seed);
     let k = config.k_colors.min(n_pixels);
 
-    fn dist_sq(p: &[f32; 3], c: &[f32; 3]) -> f32 {
-        let dr = p[0] - c[0];
-        let dg = p[1] - c[1];
-        let db = p[2] - c[2];
-        dr * dr + dg * dg + db * db
-    }
-
     // k-means++ init
     let mut centroids: Vec<[f32; 3]> = Vec::with_capacity(k);
     let first_idx = rng.gen_range(0..n_pixels);
@@ -335,9 +736,9 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
 
     for _ in 1..k {
         let last_c = centroids.last().unwrap();
-        let mut sum_sq = 0.0;
+        let mut sum_sq = 0.0f32;
         for (i, p) in opaque_pixels.iter().enumerate() {
-            let d = dist_sq(p, last_c);
+            let d = lab_dist_sq(p, last_c);
             if d < distances[i] {
                 distances[i] = d;
             }
@@ -364,8 +765,8 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
                 .iter()
                 .enumerate()
                 .min_by(|(_, a), (_, b)| {
-                    dist_sq(p, a)
-                        .partial_cmp(&dist_sq(p, b))
+                    lab_dist_sq(p, a)
+                        .partial_cmp(&lab_dist_sq(p, b))
                         .unwrap_or(Ordering::Equal)
                 })
                 .map(|(i, _)| i)
@@ -387,9 +788,10 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
             let max_move = centroids
                 .iter()
                 .zip(prev_centroids.iter())
-                .map(|(n, o)| dist_sq(n, o))
+                .map(|(n, o)| lab_dist_sq(n, o))
                 .fold(0.0f32, f32::max);
-            if max_move < 0.01 {
+            // 0.1 threshold in LAB space ≈ imperceptible color shift
+            if max_move < 0.1 {
                 break;
             }
         }
@@ -397,34 +799,205 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
         prev_centroids.copy_from_slice(&centroids);
     }
 
-    // Map every pixel to nearest centroid
+    // Map every pixel to nearest centroid, convert LAB centroid back to RGB
     let mut new_img = RgbaImage::new(img.width(), img.height());
     for (x, y, pixel) in img.enumerate_pixels() {
         if pixel[3] == 0 {
             new_img.put_pixel(x, y, *pixel);
             continue;
         }
-        let p = [pixel[0] as f32, pixel[1] as f32, pixel[2] as f32];
+        let p = rgb_to_lab(pixel[0] as f32, pixel[1] as f32, pixel[2] as f32);
         let best = centroids
             .iter()
-            .min_by(|a, b| dist_sq(&p, a).partial_cmp(&dist_sq(&p, b)).unwrap_or(Ordering::Equal))
+            .min_by(|a, b| {
+                lab_dist_sq(&p, a)
+                    .partial_cmp(&lab_dist_sq(&p, b))
+                    .unwrap_or(Ordering::Equal)
+            })
             .unwrap();
-        new_img.put_pixel(
-            x, y,
-            Rgba([
-                best[0].round() as u8,
-                best[1].round() as u8,
-                best[2].round() as u8,
-                pixel[3],
-            ]),
-        );
+        let (cr, cg, cb) = lab_to_rgb(best);
+        new_img.put_pixel(x, y, Rgba([cr, cg, cb, pixel[3]]));
     }
     Ok(new_img)
 }
 
+// ─── Background removal ───────────────────────────────────────────────────────
+
+/// Sample 4 corners (3×3 patch each) to find the dominant background color.
+fn detect_background_color(img: &RgbaImage) -> [u8; 4] {
+    let (w, h) = img.dimensions();
+    let patch = 3_u32.min(w).min(h);
+    let corners = [
+        (0u32, 0u32),
+        (w.saturating_sub(patch), 0),
+        (0, h.saturating_sub(patch)),
+        (w.saturating_sub(patch), h.saturating_sub(patch)),
+    ];
+    let mut counts: HashMap<[u8; 4], usize> = HashMap::new();
+    for (cx, cy) in corners {
+        for dy in 0..patch {
+            for dx in 0..patch {
+                let px = img.get_pixel(cx + dx, cy + dy).0;
+                if px[3] > 0 {
+                    *counts.entry(px).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(c, _)| c)
+        .unwrap_or([0, 0, 0, 255])
+}
+
+#[inline]
+fn color_distance_sq(a: &[u8; 4], b: &[u8; 4]) -> u32 {
+    let dr = a[0] as i32 - b[0] as i32;
+    let dg = a[1] as i32 - b[1] as i32;
+    let db = a[2] as i32 - b[2] as i32;
+    (dr * dr + dg * dg + db * db) as u32
+}
+
+/// BFS flood-fill from all four edges; pixels within tolerance become transparent.
+fn remove_background_flood(img: &mut RgbaImage, bg_color: [u8; 4], tolerance: u8) {
+    let (w, h) = img.dimensions();
+    // tol*tol*3 scales single-channel tolerance to 3-channel Euclidean squared
+    let tol_sq = (tolerance as u32) * (tolerance as u32) * 3;
+    let mut visited = vec![false; (w * h) as usize];
+    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
+
+    for x in 0..w {
+        queue.push_back((x, 0));
+        queue.push_back((x, h - 1));
+    }
+    for y in 1..h.saturating_sub(1) {
+        queue.push_back((0, y));
+        queue.push_back((w - 1, y));
+    }
+
+    while let Some((x, y)) = queue.pop_front() {
+        let idx = (y * w + x) as usize;
+        if visited[idx] {
+            continue;
+        }
+        visited[idx] = true;
+        let px = img.get_pixel(x, y).0;
+        if px[3] == 0 || color_distance_sq(&px, &bg_color) > tol_sq {
+            continue;
+        }
+        img.put_pixel(x, y, Rgba([px[0], px[1], px[2], 0]));
+        if x > 0 {
+            queue.push_back((x - 1, y));
+        }
+        if x < w - 1 {
+            queue.push_back((x + 1, y));
+        }
+        if y > 0 {
+            queue.push_back((x, y - 1));
+        }
+        if y < h - 1 {
+            queue.push_back((x, y + 1));
+        }
+    }
+}
+
+// ─── Sprite sheet splitting ───────────────────────────────────────────────────
+
+fn split_spritesheet(img: &RgbaImage, cols: u32, rows: u32) -> Result<Vec<RgbaImage>> {
+    if cols == 0 || rows == 0 {
+        return Err(PixelSnapperError::InvalidInput(
+            "cols and rows must be > 0".to_string(),
+        ));
+    }
+    let (w, h) = img.dimensions();
+    let fw = w / cols;
+    let fh = h / rows;
+    if fw == 0 || fh == 0 {
+        return Err(PixelSnapperError::InvalidInput(format!(
+            "Frame size too small: {}×{} — try fewer columns/rows",
+            fw, fh
+        )));
+    }
+    let mut frames = Vec::with_capacity((cols * rows) as usize);
+    for row in 0..rows {
+        for col in 0..cols {
+            let x0 = col * fw;
+            let y0 = row * fh;
+            let frame = image::imageops::crop_imm(img, x0, y0, fw, fh).to_image();
+            frames.push(frame);
+        }
+    }
+    Ok(frames)
+}
+
+// ─── Animated GIF encoding ────────────────────────────────────────────────────
+
+fn frames_to_gif(frames: &[RgbaImage], fps: u32, loop_count: u16) -> Result<Vec<u8>> {
+    if frames.is_empty() {
+        return Err(PixelSnapperError::InvalidInput("No frames to encode".to_string()));
+    }
+    let fps = fps.max(1).min(50);
+    let delay_cs = (100 / fps) as u16; // GIF delay is in centiseconds
+
+    let (w, h) = frames[0].dimensions();
+    let mut buf: Vec<u8> = Vec::new();
+
+    {
+        let mut encoder = gif::Encoder::new(&mut buf, w as u16, h as u16, &[])
+            .map_err(|e| PixelSnapperError::ProcessingError(e.to_string()))?;
+
+        let repeat = if loop_count == 0 {
+            gif::Repeat::Infinite
+        } else {
+            gif::Repeat::Finite(loop_count)
+        };
+        encoder
+            .set_repeat(repeat)
+            .map_err(|e| PixelSnapperError::ProcessingError(e.to_string()))?;
+
+        for rgba_frame in frames {
+            // Resize frame to match first frame if needed
+            let frame_img = if rgba_frame.dimensions() != (w, h) {
+                image::imageops::resize(rgba_frame, w, h, image::imageops::FilterType::Nearest)
+            } else {
+                rgba_frame.clone()
+            };
+
+            let mut frame_pixels: Vec<u8> = frame_img
+                .pixels()
+                .flat_map(|p| [p[0], p[1], p[2], p[3]])
+                .collect();
+
+            // Speed 10: good quality/speed balance (1=best, 30=fastest)
+            let mut gif_frame = gif::Frame::from_rgba_speed(
+                w as u16,
+                h as u16,
+                &mut frame_pixels,
+                10,
+            );
+            gif_frame.delay = delay_cs;
+
+            encoder
+                .write_frame(&gif_frame)
+                .map_err(|e| PixelSnapperError::ProcessingError(e.to_string()))?;
+        }
+    }
+
+    Ok(buf)
+}
+
 // ─── Gradient profiles ───────────────────────────────────────────────────────
 
-fn compute_profiles(img: &RgbaImage) -> Result<(Vec<f64>, Vec<f64>)> {
+/// Computes horizontal and vertical gradient projection profiles.
+/// bg_hint: detected background color to exclude from gradient calculation.
+/// Skipping gradients at BG↔character boundaries prevents the step-size
+/// estimator from locking onto the character outline instead of pixel grid lines.
+fn compute_profiles(
+    img: &RgbaImage,
+    bg_hint: Option<[u8; 4]>,
+    bg_tol_sq: u32,
+) -> Result<(Vec<f64>, Vec<f64>)> {
     let (w, h) = img.dimensions();
     if w < 3 || h < 3 {
         return Err(PixelSnapperError::InvalidInput(
@@ -435,23 +1008,37 @@ fn compute_profiles(img: &RgbaImage) -> Result<(Vec<f64>, Vec<f64>)> {
     let mut col_proj = vec![0.0; w as usize];
     let mut row_proj = vec![0.0; h as usize];
 
-    let gray = |x: u32, y: u32| {
+    // Returns Some(luminance) only for opaque, non-background pixels.
+    // Returning None causes the gradient at that position to be skipped,
+    // so character outline edges don't pollute the step-size signal.
+    let lum = |x: u32, y: u32| -> Option<f64> {
         let p = img.get_pixel(x, y);
-        if p[3] == 0 {
-            0.0
-        } else {
-            0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64
+        if p[3] < 32 {
+            return None; // transparent/mostly-transparent
         }
+        if let Some(bg) = bg_hint {
+            let dr = p[0] as i32 - bg[0] as i32;
+            let dg = p[1] as i32 - bg[1] as i32;
+            let db = p[2] as i32 - bg[2] as i32;
+            if (dr * dr + dg * dg + db * db) as u32 <= bg_tol_sq {
+                return None; // background color
+            }
+        }
+        Some(0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64)
     };
 
     for y in 0..h {
         for x in 1..w - 1 {
-            col_proj[x as usize] += (gray(x + 1, y) - gray(x - 1, y)).abs();
+            if let (Some(gn), Some(gp)) = (lum(x + 1, y), lum(x - 1, y)) {
+                col_proj[x as usize] += (gn - gp).abs();
+            }
         }
     }
     for x in 0..w {
         for y in 1..h - 1 {
-            row_proj[y as usize] += (gray(x, y + 1) - gray(x, y - 1)).abs();
+            if let (Some(gn), Some(gp)) = (lum(x, y + 1), lum(x, y - 1)) {
+                row_proj[y as usize] += (gn - gp).abs();
+            }
         }
     }
 
@@ -480,7 +1067,6 @@ fn estimate_step_size(profile: &[f64], config: &Config) -> Option<f64> {
         return None;
     }
 
-    // Remove peaks that are too close together
     let mut clean = vec![peaks[0]];
     for &p in peaks.iter().skip(1) {
         if p - clean.last().unwrap() > config.peak_distance_filter - 1 {
@@ -536,7 +1122,8 @@ fn walk(profile: &[f64], step_size: f64, limit: usize, config: &Config) -> Resul
 
     let mut cuts = vec![0usize];
     let mut pos = 0.0f64;
-    let window = (step_size * config.walker_search_window_ratio).max(config.walker_min_search_window);
+    let window =
+        (step_size * config.walker_search_window_ratio).max(config.walker_min_search_window);
     let mean_val: f64 = profile.iter().sum::<f64>() / profile.len() as f64;
 
     while pos < limit as f64 {
@@ -587,7 +1174,11 @@ fn stabilize_both_axes(
     let row_cells = rows1.len().saturating_sub(1).max(1);
     let col_step = w as f64 / col_cells as f64;
     let row_step = h as f64 / row_cells as f64;
-    let ratio = if col_step > row_step { col_step / row_step } else { row_step / col_step };
+    let ratio = if col_step > row_step {
+        col_step / row_step
+    } else {
+        row_step / col_step
+    };
 
     if ratio > config.max_step_ratio {
         let target = col_step.min(row_step);
@@ -657,12 +1248,22 @@ fn sanitize_cuts(mut cuts: Vec<usize>, limit: usize) -> Vec<usize> {
     let mut has_zero = false;
     let mut has_limit = false;
     for v in cuts.iter_mut() {
-        if *v == 0 { has_zero = true; }
-        if *v >= limit { *v = limit; }
-        if *v == limit { has_limit = true; }
+        if *v == 0 {
+            has_zero = true;
+        }
+        if *v >= limit {
+            *v = limit;
+        }
+        if *v == limit {
+            has_limit = true;
+        }
     }
-    if !has_zero { cuts.push(0); }
-    if !has_limit { cuts.push(limit); }
+    if !has_zero {
+        cuts.push(0);
+    }
+    if !has_limit {
+        cuts.push(limit);
+    }
     cuts.sort_unstable();
     cuts.dedup();
     cuts
@@ -675,16 +1276,26 @@ fn snap_uniform_cuts(
     config: &Config,
     min_required: usize,
 ) -> Vec<usize> {
-    if limit == 0 { return vec![0]; }
-    if limit == 1 { return vec![0, 1]; }
+    if limit == 0 {
+        return vec![0];
+    }
+    if limit == 1 {
+        return vec![0, 1];
+    }
 
     let mut desired = if target_step.is_finite() && target_step > 0.0 {
         (limit as f64 / target_step).round() as usize
-    } else { 0 };
-    desired = desired.max(min_required.saturating_sub(1)).max(1).min(limit);
+    } else {
+        0
+    };
+    desired = desired
+        .max(min_required.saturating_sub(1))
+        .max(1)
+        .min(limit);
 
     let cell_w = limit as f64 / desired as f64;
-    let window = (cell_w * config.walker_search_window_ratio).max(config.walker_min_search_window);
+    let window =
+        (cell_w * config.walker_search_window_ratio).max(config.walker_min_search_window);
     let mean_val = if profile.is_empty() {
         0.0
     } else {
@@ -695,13 +1306,20 @@ fn snap_uniform_cuts(
     for idx in 1..desired {
         let target = cell_w * idx as f64;
         let prev = *cuts.last().unwrap();
-        if prev + 1 >= limit { break; }
-        let start = ((target - window).floor() as isize).max(prev as isize + 1).max(0) as usize;
+        if prev + 1 >= limit {
+            break;
+        }
+        let start = ((target - window).floor() as isize)
+            .max(prev as isize + 1)
+            .max(0) as usize;
         let end = ((target + window).ceil() as isize).min(limit as isize - 1) as usize;
         let (mut best_idx, mut best_val) = (start.min(profile.len().saturating_sub(1)), -1.0f64);
         for i in start..=end.min(profile.len().saturating_sub(1)) {
             let v = profile.get(i).copied().unwrap_or(0.0);
-            if v > best_val { best_val = v; best_idx = i; }
+            if v > best_val {
+                best_val = v;
+                best_idx = i;
+            }
         }
         if best_val < mean_val * config.walker_strength_threshold {
             let fi = (target.round() as isize)
@@ -711,18 +1329,39 @@ fn snap_uniform_cuts(
         }
         cuts.push(best_idx);
     }
-    if *cuts.last().unwrap() != limit { cuts.push(limit); }
+    if *cuts.last().unwrap() != limit {
+        cuts.push(limit);
+    }
     sanitize_cuts(cuts, limit)
 }
 
 // ─── Resample ────────────────────────────────────────────────────────────────
 
-fn resample(img: &RgbaImage, cols: &[usize], rows: &[usize]) -> Result<RgbaImage> {
+fn resample(
+    img: &RgbaImage,
+    cols: &[usize],
+    rows: &[usize],
+    bg_hint: Option<[u8; 4]>,
+    bg_tol_sq: u32,
+) -> Result<RgbaImage> {
     if cols.len() < 2 || rows.len() < 2 {
         return Err(PixelSnapperError::ProcessingError(
             "Insufficient grid cuts for resampling".to_string(),
         ));
     }
+
+    let is_bg = |p: &[u8; 4]| -> bool {
+        if p[3] < 32 {
+            return true;
+        }
+        if let Some(bg) = bg_hint {
+            let dr = p[0] as i32 - bg[0] as i32;
+            let dg = p[1] as i32 - bg[1] as i32;
+            let db = p[2] as i32 - bg[2] as i32;
+            return (dr * dr + dg * dg + db * db) as u32 <= bg_tol_sq;
+        }
+        false
+    };
 
     let out_w = (cols.len() - 1) as u32;
     let out_h = (rows.len() - 1) as u32;
@@ -731,27 +1370,43 @@ fn resample(img: &RgbaImage, cols: &[usize], rows: &[usize]) -> Result<RgbaImage
     for (y_i, wy) in rows.windows(2).enumerate() {
         for (x_i, wx) in cols.windows(2).enumerate() {
             let (xs, xe, ys, ye) = (wx[0], wx[1], wy[0], wy[1]);
-            if xe <= xs || ye <= ys { continue; }
+            if xe <= xs || ye <= ys {
+                continue;
+            }
 
-            // Majority vote per cell
-            let mut counts: HashMap<[u8; 4], usize> = HashMap::new();
+            let mut fg_counts: HashMap<[u8; 4], usize> = HashMap::new();
+            let mut bg_counts: HashMap<[u8; 4], usize> = HashMap::new();
             for y in ys..ye {
                 for x in xs..xe {
                     if x < img.width() as usize && y < img.height() as usize {
                         let p = img.get_pixel(x as u32, y as u32).0;
-                        *counts.entry(p).or_insert(0) += 1;
+                        if is_bg(&p) {
+                            *bg_counts.entry(p).or_insert(0) += 1;
+                        } else {
+                            *fg_counts.entry(p).or_insert(0) += 1;
+                        }
                     }
                 }
             }
 
-            let best = counts
-                .into_iter()
-                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
-                .map(|(c, _)| c)
-                .unwrap_or([0, 0, 0, 0]);
+            // Prefer foreground majority; fall back to background if cell is pure BG.
+            let best = if !fg_counts.is_empty() {
+                fg_counts
+                    .into_iter()
+                    .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                    .map(|(c, _)| c)
+                    .unwrap()
+            } else {
+                bg_counts
+                    .into_iter()
+                    .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                    .map(|(c, _)| c)
+                    .unwrap_or([0, 0, 0, 0])
+            };
 
             out.put_pixel(x_i as u32, y_i as u32, Rgba(best));
         }
     }
     Ok(out)
 }
+
