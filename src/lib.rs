@@ -106,8 +106,7 @@ pub fn detect_pixel_size(input_bytes: &[u8]) -> std::result::Result<u32, wasm_bi
     validate_image_dimensions(width, height)?;
     let rgba_img = img.to_rgba8();
     let quantized = quantize_image(&rgba_img, &config)?;
-    let bg = Some(detect_background_color(&quantized));
-    let (px, py) = compute_profiles(&quantized, bg, 200)?;
+    let (px, py) = compute_profiles(&quantized, &config)?;
     let sx = estimate_step_size(&px, &config);
     let sy = estimate_step_size(&py, &config);
     let (step_x, step_y) = resolve_step_sizes(sx, sy, width, height, &config);
@@ -162,8 +161,9 @@ pub fn remove_background(
     let (w, h) = img.dimensions();
     validate_image_dimensions(w, h)?;
     let mut rgba = img.to_rgba8();
-    let bg = detect_background_color(&rgba);
-    remove_background_flood(&mut rgba, bg, tolerance.unwrap_or(20));
+    if let Some(bg) = detect_background_color(&rgba) {
+        remove_background_flood(&mut rgba, bg, tolerance.unwrap_or(20));
+    }
     let mut buf = Vec::new();
     rgba.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
         .map_err(PixelSnapperError::ImageError)?;
@@ -184,8 +184,7 @@ pub fn detect_sprite_grid(
     let config = Config::default();
 
     let quantized = quantize_image(&rgba, &config)?;
-    let bg = Some(detect_background_color(&quantized));
-    let (px, py) = compute_profiles(&quantized, bg, 200)?;
+    let (px, py) = compute_profiles(&quantized, &config)?;
     let sx = estimate_step_size(&px, &config);
     let sy = estimate_step_size(&py, &config);
     let (step_x, step_y) = resolve_step_sizes(sx, sy, w, h, &config);
@@ -241,8 +240,9 @@ pub fn spritesheet_to_gif(
     let mut rgba = img.to_rgba8();
 
     if do_remove_bg {
-        let bg = detect_background_color(&rgba);
-        remove_background_flood(&mut rgba, bg, tolerance);
+        if let Some(bg) = detect_background_color(&rgba) {
+            remove_background_flood(&mut rgba, bg, tolerance);
+        }
     }
 
     let raw_frames =
@@ -262,7 +262,52 @@ pub fn spritesheet_to_gif(
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn version() -> String {
-    "0.3.0".to_string()
+    "0.3.1".to_string()
+}
+
+/// Pack already-rendered frames (from a canvas sprite sheet) into an animated GIF.
+/// The sheet is split into cols×rows cells and each cell becomes one frame.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn encode_gif_from_sheet(
+    input_bytes: &[u8],
+    cols: u32,
+    rows: u32,
+    fps: u32,
+) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
+    let img = image::load_from_memory(input_bytes).map_err(PixelSnapperError::from)?;
+    let (w, h) = img.dimensions();
+    validate_image_dimensions(w, h)?;
+    let rgba = img.to_rgba8();
+    let frames = split_spritesheet(&rgba, cols, rows).map_err(wasm_bindgen::JsValue::from)?;
+    frames_to_gif(&frames, fps, 0).map_err(wasm_bindgen::JsValue::from)
+}
+
+/// Snap each frame of an animated GIF and return a new snapped GIF.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn snap_gif(
+    input_bytes: &[u8],
+    k_colors: Option<u32>,
+    forced_pixel_size: Option<u32>,
+    upscale_factor: Option<u32>,
+    remove_bg: Option<bool>,
+    bg_tolerance: Option<u8>,
+) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
+    let mut config = Config::default();
+    if let Some(k) = k_colors {
+        if k > 0 { config.k_colors = k as usize; }
+    }
+    if let Some(ps) = forced_pixel_size {
+        config.forced_pixel_size = ps as usize;
+    }
+    if let Some(uf) = upscale_factor {
+        config.upscale_factor = (uf as usize).max(1).min(16);
+    }
+    let do_remove_bg = remove_bg.unwrap_or(false);
+    let tolerance = bg_tolerance.unwrap_or(20);
+    snap_gif_internal(input_bytes, &config, do_remove_bg, tolerance)
+        .map_err(wasm_bindgen::JsValue::from)
 }
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
@@ -391,8 +436,7 @@ fn run_cli(cli: Cli) -> Result<()> {
                 let (w, h) = img.dimensions();
                 let rgba = img.to_rgba8();
                 let q = quantize_image(&rgba, &config)?;
-                let bg = Some(detect_background_color(&q));
-                let (px, py) = compute_profiles(&q, bg, 200)?;
+                let (px, py) = compute_profiles(&q, &config)?;
                 let sx = estimate_step_size(&px, &config);
                 let sy = estimate_step_size(&py, &config);
                 let (sx, sy) = resolve_step_sizes(sx, sy, w, h, &config);
@@ -459,8 +503,9 @@ fn run_cli(cli: Cli) -> Result<()> {
             let mut rgba = img.to_rgba8();
 
             if remove_bg {
-                let bg = detect_background_color(&rgba);
-                remove_background_flood(&mut rgba, bg, bg_tolerance);
+                if let Some(bg) = detect_background_color(&rgba) {
+                    remove_background_flood(&mut rgba, bg, bg_tolerance);
+                }
             }
 
             let raw_frames = split_spritesheet(&rgba, cols, rows)?;
@@ -521,8 +566,9 @@ fn process_image_bytes_common(
 
     // Step 0: background removal before quantization
     if remove_bg {
-        let bg = detect_background_color(&rgba_img);
-        remove_background_flood(&mut rgba_img, bg, bg_tolerance);
+        if let Some(bg) = detect_background_color(&rgba_img) {
+            remove_background_flood(&mut rgba_img, bg, bg_tolerance);
+        }
     }
 
     let final_img = snap_frame(&rgba_img, &config)?;
@@ -541,13 +587,7 @@ fn snap_frame(rgba_img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
     let (width, height) = rgba_img.dimensions();
     let quantized_img = quantize_image(rgba_img, config)?;
 
-    // Auto-detect background so gradient profiles ignore BG↔character edges.
-    // tol_sq=200 ≈ per-channel delta of ~8 after quantization — tight enough
-    // to match only the exact bg palette entry, not nearby character colors.
-    let bg_hint = Some(detect_background_color(&quantized_img));
-    let bg_tol_sq = 200u32;
-
-    let (profile_x, profile_y) = compute_profiles(&quantized_img, bg_hint, bg_tol_sq)?;
+    let (profile_x, profile_y) = compute_profiles(&quantized_img, config)?;
 
     let (step_x, step_y) = if config.forced_pixel_size > 0 {
         let s = config.forced_pixel_size as f64;
@@ -571,7 +611,7 @@ fn snap_frame(rgba_img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
         config,
     );
 
-    let output_img = resample(&quantized_img, &col_cuts, &row_cuts, bg_hint, bg_tol_sq)?;
+    let output_img = resample(&quantized_img, &col_cuts, &row_cuts)?;
 
     let final_img = if config.upscale_factor > 1 {
         upscale_nearest(&output_img, config.upscale_factor)
@@ -824,7 +864,8 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
 // ─── Background removal ───────────────────────────────────────────────────────
 
 /// Sample 4 corners (3×3 patch each) to find the dominant background color.
-fn detect_background_color(img: &RgbaImage) -> [u8; 4] {
+/// Returns None when all corners are transparent (e.g. pre-cut sprites).
+fn detect_background_color(img: &RgbaImage) -> Option<[u8; 4]> {
     let (w, h) = img.dimensions();
     let patch = 3_u32.min(w).min(h);
     let corners = [
@@ -844,11 +885,7 @@ fn detect_background_color(img: &RgbaImage) -> [u8; 4] {
             }
         }
     }
-    counts
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(c, _)| c)
-        .unwrap_or([0, 0, 0, 255])
+    counts.into_iter().max_by_key(|(_, c)| *c).map(|(c, _)| c)
 }
 
 #[inline]
@@ -987,17 +1024,89 @@ fn frames_to_gif(frames: &[RgbaImage], fps: u32, loop_count: u16) -> Result<Vec<
     Ok(buf)
 }
 
+// ─── GIF snap ────────────────────────────────────────────────────────────────
+
+/// Decode all frames of an animated GIF. Returns (frame RGBA, delay in centiseconds).
+fn read_gif_frames(input_bytes: &[u8]) -> Result<Vec<(RgbaImage, u16)>> {
+    use image::AnimationDecoder;
+    let cursor = std::io::Cursor::new(input_bytes);
+    let decoder = image::codecs::gif::GifDecoder::new(cursor)
+        .map_err(|e| PixelSnapperError::ProcessingError(format!("GIF decode: {}", e)))?;
+    let mut out = Vec::new();
+    for frame in decoder.into_frames() {
+        let frame = frame
+            .map_err(|e| PixelSnapperError::ProcessingError(format!("GIF frame: {}", e)))?;
+        let (num, denom) = frame.delay().numer_denom_ms();
+        // delay in centiseconds (GIF unit); avoid divide-by-zero
+        let delay_cs = if denom == 0 { 10u16 } else {
+            ((num as f64 / denom as f64) / 10.0).round().max(1.0) as u16
+        };
+        out.push((frame.into_buffer(), delay_cs));
+    }
+    if out.is_empty() {
+        return Err(PixelSnapperError::InvalidInput("GIF has no frames".to_string()));
+    }
+    Ok(out)
+}
+
+/// Encode frames with individual per-frame delays (centiseconds).
+fn encode_gif_with_delays(frames: &[RgbaImage], delays: &[u16]) -> Result<Vec<u8>> {
+    if frames.is_empty() {
+        return Err(PixelSnapperError::InvalidInput("No frames".to_string()));
+    }
+    let (w, h) = frames[0].dimensions();
+    let mut buf = Vec::new();
+    {
+        let mut enc = gif::Encoder::new(&mut buf, w as u16, h as u16, &[])
+            .map_err(|e| PixelSnapperError::ProcessingError(e.to_string()))?;
+        enc.set_repeat(gif::Repeat::Infinite)
+            .map_err(|e| PixelSnapperError::ProcessingError(e.to_string()))?;
+        for (i, rgba_frame) in frames.iter().enumerate() {
+            let resized = if rgba_frame.dimensions() != (w, h) {
+                image::imageops::resize(rgba_frame, w, h, image::imageops::FilterType::Nearest)
+            } else {
+                rgba_frame.clone()
+            };
+            let mut pixels: Vec<u8> = resized.pixels().flat_map(|p| [p[0], p[1], p[2], p[3]]).collect();
+            let mut f = gif::Frame::from_rgba_speed(w as u16, h as u16, &mut pixels, 10);
+            f.delay = delays.get(i).copied().unwrap_or(10);
+            enc.write_frame(&f)
+                .map_err(|e| PixelSnapperError::ProcessingError(e.to_string()))?;
+        }
+    }
+    Ok(buf)
+}
+
+fn snap_gif_internal(
+    input_bytes: &[u8],
+    config: &Config,
+    remove_bg: bool,
+    bg_tolerance: u8,
+) -> Result<Vec<u8>> {
+    let frames_with_delays = read_gif_frames(input_bytes)?;
+    let (fw, fh) = frames_with_delays[0].0.dimensions();
+    validate_image_dimensions(fw, fh)?;
+
+    let mut snapped: Vec<RgbaImage> = Vec::with_capacity(frames_with_delays.len());
+    let mut delays: Vec<u16> = Vec::with_capacity(frames_with_delays.len());
+
+    for (mut frame, delay) in frames_with_delays {
+        if remove_bg {
+            if let Some(bg) = detect_background_color(&frame) {
+                remove_background_flood(&mut frame, bg, bg_tolerance);
+            }
+        }
+        snapped.push(snap_frame(&frame, config)?);
+        delays.push(delay);
+    }
+
+    encode_gif_with_delays(&snapped, &delays)
+}
+
 // ─── Gradient profiles ───────────────────────────────────────────────────────
 
-/// Computes horizontal and vertical gradient projection profiles.
-/// bg_hint: detected background color to exclude from gradient calculation.
-/// Skipping gradients at BG↔character boundaries prevents the step-size
-/// estimator from locking onto the character outline instead of pixel grid lines.
-fn compute_profiles(
-    img: &RgbaImage,
-    bg_hint: Option<[u8; 4]>,
-    bg_tol_sq: u32,
-) -> Result<(Vec<f64>, Vec<f64>)> {
+/// Computes horizontal and vertical gradient projection profiles over all opaque pixels.
+fn compute_profiles(img: &RgbaImage, _config: &Config) -> Result<(Vec<f64>, Vec<f64>)> {
     let (w, h) = img.dimensions();
     if w < 3 || h < 3 {
         return Err(PixelSnapperError::InvalidInput(
@@ -1005,25 +1114,12 @@ fn compute_profiles(
         ));
     }
 
-    let mut col_proj = vec![0.0; w as usize];
-    let mut row_proj = vec![0.0; h as usize];
+    let mut col_proj = vec![0.0f64; w as usize];
+    let mut row_proj = vec![0.0f64; h as usize];
 
-    // Returns Some(luminance) only for opaque, non-background pixels.
-    // Returning None causes the gradient at that position to be skipped,
-    // so character outline edges don't pollute the step-size signal.
     let lum = |x: u32, y: u32| -> Option<f64> {
         let p = img.get_pixel(x, y);
-        if p[3] < 32 {
-            return None; // transparent/mostly-transparent
-        }
-        if let Some(bg) = bg_hint {
-            let dr = p[0] as i32 - bg[0] as i32;
-            let dg = p[1] as i32 - bg[1] as i32;
-            let db = p[2] as i32 - bg[2] as i32;
-            if (dr * dr + dg * dg + db * db) as u32 <= bg_tol_sq {
-                return None; // background color
-            }
-        }
+        if p[3] < 32 { return None; }
         Some(0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64)
     };
 
@@ -1337,31 +1433,12 @@ fn snap_uniform_cuts(
 
 // ─── Resample ────────────────────────────────────────────────────────────────
 
-fn resample(
-    img: &RgbaImage,
-    cols: &[usize],
-    rows: &[usize],
-    bg_hint: Option<[u8; 4]>,
-    bg_tol_sq: u32,
-) -> Result<RgbaImage> {
+fn resample(img: &RgbaImage, cols: &[usize], rows: &[usize]) -> Result<RgbaImage> {
     if cols.len() < 2 || rows.len() < 2 {
         return Err(PixelSnapperError::ProcessingError(
             "Insufficient grid cuts for resampling".to_string(),
         ));
     }
-
-    let is_bg = |p: &[u8; 4]| -> bool {
-        if p[3] < 32 {
-            return true;
-        }
-        if let Some(bg) = bg_hint {
-            let dr = p[0] as i32 - bg[0] as i32;
-            let dg = p[1] as i32 - bg[1] as i32;
-            let db = p[2] as i32 - bg[2] as i32;
-            return (dr * dr + dg * dg + db * db) as u32 <= bg_tol_sq;
-        }
-        false
-    };
 
     let out_w = (cols.len() - 1) as u32;
     let out_h = (rows.len() - 1) as u32;
@@ -1374,35 +1451,23 @@ fn resample(
                 continue;
             }
 
-            let mut fg_counts: HashMap<[u8; 4], usize> = HashMap::new();
-            let mut bg_counts: HashMap<[u8; 4], usize> = HashMap::new();
+            let mut counts: HashMap<[u8; 4], usize> = HashMap::new();
             for y in ys..ye {
                 for x in xs..xe {
                     if x < img.width() as usize && y < img.height() as usize {
                         let p = img.get_pixel(x as u32, y as u32).0;
-                        if is_bg(&p) {
-                            *bg_counts.entry(p).or_insert(0) += 1;
-                        } else {
-                            *fg_counts.entry(p).or_insert(0) += 1;
+                        if p[3] >= 32 {
+                            *counts.entry(p).or_insert(0) += 1;
                         }
                     }
                 }
             }
 
-            // Prefer foreground majority; fall back to background if cell is pure BG.
-            let best = if !fg_counts.is_empty() {
-                fg_counts
-                    .into_iter()
-                    .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
-                    .map(|(c, _)| c)
-                    .unwrap()
-            } else {
-                bg_counts
-                    .into_iter()
-                    .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
-                    .map(|(c, _)| c)
-                    .unwrap_or([0, 0, 0, 0])
-            };
+            let best = counts
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                .map(|(c, _)| c)
+                .unwrap_or([0, 0, 0, 0]);
 
             out.put_pixel(x_i as u32, y_i as u32, Rgba(best));
         }
