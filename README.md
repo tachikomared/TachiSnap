@@ -6,6 +6,13 @@ Made by TachikomaRed and smolemaru.
 
 TachiSnap is a free, client-side Rust + WebAssembly tool for cleaning up AI-generated pixel art. Images are processed locally in the browser; they are not uploaded to a server.
 
+## Preview
+
+Watch TachiSnap in action:
+
+- [Pixel art cleanup demo](https://x.com/smolekoma/status/2051786420038275571?s=20)
+- [Animation processing test](https://x.com/smolekoma/status/2051654996475674816?s=20)
+
 ## What it does
 
 AI image models often produce pixel art with uneven blocks, drifting grids, fuzzy colors, or unwanted backgrounds. TachiSnap cleans that up by:
