@@ -126,6 +126,8 @@ pub fn process_image(
     upscale_factor: Option<u32>,
     remove_bg: Option<bool>,
     bg_tolerance: Option<u8>,
+    bg_color_rgb: Option<u32>,
+    bg_global: Option<bool>,
 ) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
     let mut config = Config::default();
 
@@ -144,9 +146,17 @@ pub fn process_image(
 
     let do_remove_bg = remove_bg.unwrap_or(false);
     let tolerance = bg_tolerance.unwrap_or(20);
+    let manual_bg = bg_color_rgb.map(packed_rgb_to_rgba);
 
-    process_image_bytes_common(input_bytes, Some(config), do_remove_bg, tolerance)
-        .map_err(|e| wasm_bindgen::JsValue::from(e))
+    process_image_bytes_common(
+        input_bytes,
+        Some(config),
+        do_remove_bg,
+        tolerance,
+        manual_bg,
+        bg_global.unwrap_or(false),
+    )
+    .map_err(|e| wasm_bindgen::JsValue::from(e))
 }
 
 /// Remove background from an image by flood-filling transparent from edges.
@@ -217,6 +227,10 @@ pub fn spritesheet_to_gif(
     upscale_factor: Option<u32>,
     remove_bg: Option<bool>,
     bg_tolerance: Option<u8>,
+    bg_color_rgb: Option<u32>,
+    frame_off_x: Option<u32>,
+    frame_off_y: Option<u32>,
+    bg_global: Option<bool>,
 ) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
     let mut config = Config::default();
     if let Some(k) = k_colors {
@@ -240,18 +254,30 @@ pub fn spritesheet_to_gif(
     let mut rgba = img.to_rgba8();
 
     if do_remove_bg {
-        if let Some(bg) = detect_background_color(&rgba) {
-            remove_background_flood(&mut rgba, bg, tolerance);
+        let bg = bg_color_rgb
+            .map(packed_rgb_to_rgba)
+            .or_else(|| detect_background_color(&rgba));
+        if let Some(bg) = bg {
+            if bg_global.unwrap_or(false) {
+                remove_background_global(&mut rgba, bg, tolerance);
+            } else {
+                remove_background_flood(&mut rgba, bg, tolerance);
+            }
         }
     }
 
-    let raw_frames =
-        split_spritesheet(&rgba, cols, rows).map_err(wasm_bindgen::JsValue::from)?;
+    let raw_frames = split_spritesheet(
+        &rgba,
+        cols,
+        rows,
+        frame_off_x.unwrap_or(0),
+        frame_off_y.unwrap_or(0),
+    )
+    .map_err(wasm_bindgen::JsValue::from)?;
 
     let mut snapped_frames: Vec<RgbaImage> = Vec::with_capacity(raw_frames.len());
     for frame in &raw_frames {
-        let snapped =
-            snap_frame(frame, &config).map_err(wasm_bindgen::JsValue::from)?;
+        let snapped = snap_frame(frame, &config).map_err(wasm_bindgen::JsValue::from)?;
         snapped_frames.push(snapped);
     }
 
@@ -274,12 +300,21 @@ pub fn encode_gif_from_sheet(
     cols: u32,
     rows: u32,
     fps: u32,
+    frame_off_x: Option<u32>,
+    frame_off_y: Option<u32>,
 ) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
     let img = image::load_from_memory(input_bytes).map_err(PixelSnapperError::from)?;
     let (w, h) = img.dimensions();
     validate_image_dimensions(w, h)?;
     let rgba = img.to_rgba8();
-    let frames = split_spritesheet(&rgba, cols, rows).map_err(wasm_bindgen::JsValue::from)?;
+    let frames = split_spritesheet(
+        &rgba,
+        cols,
+        rows,
+        frame_off_x.unwrap_or(0),
+        frame_off_y.unwrap_or(0),
+    )
+    .map_err(wasm_bindgen::JsValue::from)?;
     frames_to_gif(&frames, fps, 0).map_err(wasm_bindgen::JsValue::from)
 }
 
@@ -293,10 +328,14 @@ pub fn snap_gif(
     upscale_factor: Option<u32>,
     remove_bg: Option<bool>,
     bg_tolerance: Option<u8>,
+    bg_color_rgb: Option<u32>,
+    bg_global: Option<bool>,
 ) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
     let mut config = Config::default();
     if let Some(k) = k_colors {
-        if k > 0 { config.k_colors = k as usize; }
+        if k > 0 {
+            config.k_colors = k as usize;
+        }
     }
     if let Some(ps) = forced_pixel_size {
         config.forced_pixel_size = ps as usize;
@@ -306,21 +345,29 @@ pub fn snap_gif(
     }
     let do_remove_bg = remove_bg.unwrap_or(false);
     let tolerance = bg_tolerance.unwrap_or(20);
-    snap_gif_internal(input_bytes, &config, do_remove_bg, tolerance)
-        .map_err(wasm_bindgen::JsValue::from)
+    let manual_bg = bg_color_rgb.map(packed_rgb_to_rgba);
+    snap_gif_internal(
+        input_bytes,
+        &config,
+        do_remove_bg,
+        tolerance,
+        manual_bg,
+        bg_global.unwrap_or(false),
+    )
+    .map_err(wasm_bindgen::JsValue::from)
 }
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser)]
 #[command(
-    name = "pixel-snapper",
-    version = "0.3.0",
-    about = "Snap AI-generated pixel art to a perfect grid"
+    name = "tachi-snap",
+    version = "0.3.1",
+    about = "TachiSnap - Pixel Snapper for animation pixel artists. Made by TachikomaRed and smolemaru."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -352,6 +399,12 @@ enum Commands {
         /// Background removal tolerance (0–80)
         #[arg(long, default_value_t = 20)]
         bg_tolerance: u8,
+        /// Background removal mode
+        #[arg(long, value_enum, default_value_t = BgMode::Flood)]
+        bg_mode: BgMode,
+        /// Manual background color as #RRGGBB, 0xRRGGBB, or R,G,B
+        #[arg(long)]
+        bg_color: Option<String>,
     },
     /// Convert a sprite sheet to an animated GIF
     Animate {
@@ -381,7 +434,55 @@ enum Commands {
         /// Background removal tolerance (0–80)
         #[arg(long, default_value_t = 20)]
         bg_tolerance: u8,
+        /// Background removal mode
+        #[arg(long, value_enum, default_value_t = BgMode::Flood)]
+        bg_mode: BgMode,
+        /// Manual background color as #RRGGBB, 0xRRGGBB, or R,G,B
+        #[arg(long)]
+        bg_color: Option<String>,
+        /// Sprite sheet frame origin X offset
+        #[arg(long, default_value_t = 0)]
+        frame_off_x: u32,
+        /// Sprite sheet frame origin Y offset
+        #[arg(long, default_value_t = 0)]
+        frame_off_y: u32,
     },
+    /// Snap every supported image in a folder for agentic workflows
+    Bulk {
+        input_dir: String,
+        output_dir: String,
+        /// Recurse into nested folders
+        #[arg(long)]
+        recursive: bool,
+        /// Palette size (number of colors)
+        #[arg(long, default_value_t = 16)]
+        k: usize,
+        /// Pixel size override (0 = auto-detect)
+        #[arg(long, default_value_t = 0)]
+        pixel_size: usize,
+        /// Upscale factor (1-16)
+        #[arg(long, default_value_t = 1)]
+        upscale: usize,
+        /// Auto-remove background
+        #[arg(long)]
+        remove_bg: bool,
+        /// Background removal tolerance (0-80)
+        #[arg(long, default_value_t = 20)]
+        bg_tolerance: u8,
+        /// Background removal mode
+        #[arg(long, value_enum, default_value_t = BgMode::Flood)]
+        bg_mode: BgMode,
+        /// Manual background color as #RRGGBB, 0xRRGGBB, or R,G,B
+        #[arg(long)]
+        bg_color: Option<String>,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum BgMode {
+    Flood,
+    Global,
 }
 
 fn main() {
@@ -407,6 +508,8 @@ fn run_cli(cli: Cli) -> Result<()> {
             upscale,
             remove_bg,
             bg_tolerance,
+            bg_mode,
+            bg_color,
         } => {
             let mut config = Config {
                 input_path: input.clone(),
@@ -424,11 +527,21 @@ fn run_cli(cli: Cli) -> Result<()> {
             }
 
             let t0 = std::time::Instant::now();
+            let manual_bg = match bg_color.as_deref() {
+                Some(value) => Some(parse_rgb_arg(value)?),
+                None => None,
+            };
             let img_bytes = std::fs::read(&input).map_err(|e| {
                 PixelSnapperError::ProcessingError(format!("Failed to read: {}", e))
             })?;
-            let output_bytes =
-                process_image_bytes_common(&img_bytes, Some(config.clone()), remove_bg, bg_tolerance)?;
+            let output_bytes = process_image_bytes_common(
+                &img_bytes,
+                Some(config.clone()),
+                remove_bg,
+                bg_tolerance,
+                manual_bg,
+                bg_mode == BgMode::Global,
+            )?;
 
             // Detect pixel size for reporting
             let detected_px = {
@@ -476,6 +589,10 @@ fn run_cli(cli: Cli) -> Result<()> {
             upscale,
             remove_bg,
             bg_tolerance,
+            bg_mode,
+            bg_color,
+            frame_off_x,
+            frame_off_y,
         } => {
             let mut config = Config {
                 input_path: input.clone(),
@@ -493,6 +610,10 @@ fn run_cli(cli: Cli) -> Result<()> {
             }
 
             let t0 = std::time::Instant::now();
+            let manual_bg = match bg_color.as_deref() {
+                Some(value) => Some(parse_rgb_arg(value)?),
+                None => None,
+            };
             let img_bytes = std::fs::read(&input).map_err(|e| {
                 PixelSnapperError::ProcessingError(format!("Failed to read: {}", e))
             })?;
@@ -503,12 +624,17 @@ fn run_cli(cli: Cli) -> Result<()> {
             let mut rgba = img.to_rgba8();
 
             if remove_bg {
-                if let Some(bg) = detect_background_color(&rgba) {
-                    remove_background_flood(&mut rgba, bg, bg_tolerance);
+                let bg = manual_bg.or_else(|| detect_background_color(&rgba));
+                if let Some(bg) = bg {
+                    if bg_mode == BgMode::Global {
+                        remove_background_global(&mut rgba, bg, bg_tolerance);
+                    } else {
+                        remove_background_flood(&mut rgba, bg, bg_tolerance);
+                    }
                 }
             }
 
-            let raw_frames = split_spritesheet(&rgba, cols, rows)?;
+            let raw_frames = split_spritesheet(&rgba, cols, rows, frame_off_x, frame_off_y)?;
             let frame_count = raw_frames.len();
 
             let mut snapped_frames: Vec<RgbaImage> = Vec::with_capacity(frame_count);
@@ -528,7 +654,13 @@ fn run_cli(cli: Cli) -> Result<()> {
             if use_json {
                 println!(
                     r#"{{"status":"ok","output":"{}","frames":{},"frame_w":{},"frame_h":{},"fps":{},"size_bytes":{},"elapsed_ms":{}}}"#,
-                    output, frame_count, fw, fh, fps, gif_bytes.len(), elapsed
+                    output,
+                    frame_count,
+                    fw,
+                    fh,
+                    fps,
+                    gif_bytes.len(),
+                    elapsed
                 );
             } else {
                 println!(
@@ -545,7 +677,383 @@ fn run_cli(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+
+        Commands::Bulk {
+            input_dir,
+            output_dir,
+            recursive,
+            k,
+            pixel_size,
+            upscale,
+            remove_bg,
+            bg_tolerance,
+            bg_mode,
+            bg_color,
+        } => run_bulk(
+            &input_dir,
+            &output_dir,
+            recursive,
+            k,
+            pixel_size,
+            upscale,
+            remove_bg,
+            bg_tolerance,
+            bg_mode,
+            bg_color.as_deref(),
+            use_json,
+        ),
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct BulkItemResult {
+    input: String,
+    output: Option<String>,
+    status: &'static str,
+    kind: &'static str,
+    elapsed_ms: u128,
+    size_bytes: Option<usize>,
+    error: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_bulk(
+    input_dir: &str,
+    output_dir: &str,
+    recursive: bool,
+    k: usize,
+    pixel_size: usize,
+    upscale: usize,
+    remove_bg: bool,
+    bg_tolerance: u8,
+    bg_mode: BgMode,
+    bg_color: Option<&str>,
+    use_json: bool,
+) -> Result<()> {
+    let input_root = std::path::PathBuf::from(input_dir);
+    let output_root = std::path::PathBuf::from(output_dir);
+    if !input_root.is_dir() {
+        return Err(PixelSnapperError::InvalidInput(format!(
+            "Input folder does not exist: {}",
+            input_dir
+        )));
+    }
+
+    let manual_bg = match bg_color {
+        Some(value) => Some(parse_rgb_arg(value)?),
+        None => None,
+    };
+
+    let mut config = Config::default();
+    if k > 0 {
+        config.k_colors = k;
+    }
+    config.forced_pixel_size = pixel_size;
+    config.upscale_factor = upscale.max(1).min(16);
+
+    let files = collect_image_files(&input_root, recursive)?;
+    std::fs::create_dir_all(&output_root).map_err(|e| {
+        PixelSnapperError::ProcessingError(format!("Failed to create output folder: {}", e))
+    })?;
+
+    if !use_json {
+        println!(
+            "TachiSnap bulk: {} file(s) from {} -> {}",
+            files.len(),
+            input_root.display(),
+            output_root.display()
+        );
+    }
+
+    let started = std::time::Instant::now();
+    let mut results = Vec::with_capacity(files.len());
+    let mut ok_count = 0usize;
+
+    for input_path in files {
+        let item_started = std::time::Instant::now();
+        let rel = input_path.strip_prefix(&input_root).unwrap_or(&input_path);
+        let output_path = output_path_for_bulk(&output_root, rel);
+        let kind = if is_gif_path(&input_path) {
+            "gif"
+        } else {
+            "image"
+        };
+
+        let item_result = (|| -> Result<usize> {
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    PixelSnapperError::ProcessingError(format!(
+                        "Failed to create output folder {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
+
+            let bytes = std::fs::read(&input_path).map_err(|e| {
+                PixelSnapperError::ProcessingError(format!("Failed to read: {}", e))
+            })?;
+            let output_bytes = if is_gif_path(&input_path) {
+                snap_gif_internal(
+                    &bytes,
+                    &config,
+                    remove_bg,
+                    bg_tolerance,
+                    manual_bg,
+                    bg_mode == BgMode::Global,
+                )?
+            } else {
+                process_image_bytes_common(
+                    &bytes,
+                    Some(config.clone()),
+                    remove_bg,
+                    bg_tolerance,
+                    manual_bg,
+                    bg_mode == BgMode::Global,
+                )?
+            };
+
+            std::fs::write(&output_path, &output_bytes).map_err(|e| {
+                PixelSnapperError::ProcessingError(format!("Failed to write: {}", e))
+            })?;
+            Ok(output_bytes.len())
+        })();
+
+        match item_result {
+            Ok(size_bytes) => {
+                ok_count += 1;
+                if !use_json {
+                    println!("ok: {} -> {}", input_path.display(), output_path.display());
+                }
+                results.push(BulkItemResult {
+                    input: path_to_json_string(&input_path),
+                    output: Some(path_to_json_string(&output_path)),
+                    status: "ok",
+                    kind,
+                    elapsed_ms: item_started.elapsed().as_millis(),
+                    size_bytes: Some(size_bytes),
+                    error: None,
+                });
+            }
+            Err(err) => {
+                if !use_json {
+                    eprintln!("error: {} ({})", input_path.display(), err);
+                }
+                results.push(BulkItemResult {
+                    input: path_to_json_string(&input_path),
+                    output: Some(path_to_json_string(&output_path)),
+                    status: "error",
+                    kind,
+                    elapsed_ms: item_started.elapsed().as_millis(),
+                    size_bytes: None,
+                    error: Some(err.to_string()),
+                });
+            }
+        }
+    }
+
+    let failed = results.len().saturating_sub(ok_count);
+    if use_json {
+        print_bulk_json(
+            &path_to_json_string(&input_root),
+            &path_to_json_string(&output_root),
+            results.len(),
+            ok_count,
+            failed,
+            started.elapsed().as_millis(),
+            &results,
+        );
+    } else {
+        println!(
+            "Done: {} ok, {} failed, output: {}",
+            ok_count,
+            failed,
+            output_root.display()
+        );
+    }
+
+    if failed > 0 {
+        return Err(PixelSnapperError::ProcessingError(format!(
+            "{} file(s) failed during bulk processing",
+            failed
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_image_files(root: &std::path::Path, recursive: bool) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    collect_image_files_into(root, recursive, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_image_files_into(
+    dir: &std::path::Path,
+    recursive: bool,
+    files: &mut Vec<std::path::PathBuf>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir).map_err(|e| {
+        PixelSnapperError::ProcessingError(format!(
+            "Failed to read folder {}: {}",
+            dir.display(),
+            e
+        ))
+    })? {
+        let entry = entry.map_err(|e| {
+            PixelSnapperError::ProcessingError(format!("Failed to read folder entry: {}", e))
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            if recursive {
+                collect_image_files_into(&path, recursive, files)?;
+            }
+        } else if is_supported_image_path(&path) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_supported_image_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_gif_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("gif"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn output_path_for_bulk(
+    output_root: &std::path::Path,
+    rel: &std::path::Path,
+) -> std::path::PathBuf {
+    let mut output = output_root.join(rel);
+    let stem = rel
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .to_string();
+    let ext = if is_gif_path(rel) { "gif" } else { "png" };
+    output.set_file_name(format!("{}_tachisnap.{}", stem, ext));
+    output
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_rgb_arg(value: &str) -> Result<[u8; 4]> {
+    let trimmed = value.trim();
+    let hex = trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.strip_prefix("0x"))
+        .or_else(|| trimmed.strip_prefix("0X"));
+    if let Some(hex) = hex {
+        if hex.len() == 6 {
+            let packed = u32::from_str_radix(hex, 16).map_err(|_| {
+                PixelSnapperError::InvalidInput(format!("Invalid --bg-color: {}", value))
+            })?;
+            return Ok(packed_rgb_to_rgba(packed));
+        }
+    }
+
+    let parts: Vec<&str> = trimmed.split(',').collect();
+    if parts.len() == 3 {
+        let mut rgb = [0u8; 4];
+        for (i, part) in parts.iter().enumerate() {
+            rgb[i] = part.trim().parse::<u8>().map_err(|_| {
+                PixelSnapperError::InvalidInput(format!("Invalid --bg-color: {}", value))
+            })?;
+        }
+        rgb[3] = 255;
+        return Ok(rgb);
+    }
+
+    Err(PixelSnapperError::InvalidInput(
+        "--bg-color must be #RRGGBB, 0xRRGGBB, or R,G,B".to_string(),
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn path_to_json_string(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn print_bulk_json(
+    input_dir: &str,
+    output_dir: &str,
+    total: usize,
+    ok: usize,
+    failed: usize,
+    elapsed_ms: u128,
+    results: &[BulkItemResult],
+) {
+    println!(
+        r#"{{"status":"{}","app":"TachiSnap","made_by":["TachikomaRed","smolemaru"],"input_dir":"{}","output_dir":"{}","total":{},"ok":{},"failed":{},"elapsed_ms":{},"files":[{}]}}"#,
+        if failed == 0 { "ok" } else { "partial" },
+        json_escape(input_dir),
+        json_escape(output_dir),
+        total,
+        ok,
+        failed,
+        elapsed_ms,
+        results
+            .iter()
+            .map(|item| {
+                format!(
+                    r#"{{"status":"{}","kind":"{}","input":"{}","output":{},"size_bytes":{},"elapsed_ms":{},"error":{}}}"#,
+                    item.status,
+                    item.kind,
+                    json_escape(&item.input),
+                    item.output
+                        .as_ref()
+                        .map(|v| format!(r#""{}""#, json_escape(v)))
+                        .unwrap_or_else(|| "null".to_string()),
+                    item.size_bytes
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
+                    item.elapsed_ms,
+                    item.error
+                        .as_ref()
+                        .map(|v| format!(r#""{}""#, json_escape(v)))
+                        .unwrap_or_else(|| "null".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 }
 
 // ─── Core pipeline ──────────────────────────────────────────────────────────
@@ -555,6 +1063,8 @@ fn process_image_bytes_common(
     config: Option<Config>,
     remove_bg: bool,
     bg_tolerance: u8,
+    manual_bg: Option<[u8; 4]>,
+    bg_global: bool,
 ) -> Result<Vec<u8>> {
     let config = config.unwrap_or_default();
 
@@ -566,8 +1076,13 @@ fn process_image_bytes_common(
 
     // Step 0: background removal before quantization
     if remove_bg {
-        if let Some(bg) = detect_background_color(&rgba_img) {
-            remove_background_flood(&mut rgba_img, bg, bg_tolerance);
+        let bg = manual_bg.or_else(|| detect_background_color(&rgba_img));
+        if let Some(bg) = bg {
+            if bg_global {
+                remove_background_global(&mut rgba_img, bg, bg_tolerance);
+            } else {
+                remove_background_flood(&mut rgba_img, bg, bg_tolerance);
+            }
         }
     }
 
@@ -737,6 +1252,16 @@ fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[inline]
+fn packed_rgb_to_rgba(packed: u32) -> [u8; 4] {
+    [
+        ((packed >> 16) & 0xFF) as u8,
+        ((packed >> 8) & 0xFF) as u8,
+        (packed & 0xFF) as u8,
+        255,
+    ]
 }
 
 // ─── Color quantization (k-means++ in CIELAB) ────────────────────────────────
@@ -939,17 +1464,43 @@ fn remove_background_flood(img: &mut RgbaImage, bg_color: [u8; 4], tolerance: u8
     }
 }
 
+/// Remove every pixel within tolerance of the background color, regardless of position.
+fn remove_background_global(img: &mut RgbaImage, bg_color: [u8; 4], tolerance: u8) {
+    let tol_sq = (tolerance as u32) * (tolerance as u32) * 3;
+    for pixel in img.pixels_mut() {
+        if pixel[3] == 0 {
+            continue;
+        }
+        if color_distance_sq(&pixel.0, &bg_color) <= tol_sq {
+            pixel[3] = 0;
+        }
+    }
+}
+
 // ─── Sprite sheet splitting ───────────────────────────────────────────────────
 
-fn split_spritesheet(img: &RgbaImage, cols: u32, rows: u32) -> Result<Vec<RgbaImage>> {
+fn split_spritesheet(
+    img: &RgbaImage,
+    cols: u32,
+    rows: u32,
+    off_x: u32,
+    off_y: u32,
+) -> Result<Vec<RgbaImage>> {
     if cols == 0 || rows == 0 {
         return Err(PixelSnapperError::InvalidInput(
             "cols and rows must be > 0".to_string(),
         ));
     }
     let (w, h) = img.dimensions();
-    let fw = w / cols;
-    let fh = h / rows;
+    if off_x >= w || off_y >= h {
+        return Err(PixelSnapperError::InvalidInput(
+            "Frame origin must be inside the image".to_string(),
+        ));
+    }
+    let usable_w = w - off_x;
+    let usable_h = h - off_y;
+    let fw = usable_w / cols;
+    let fh = usable_h / rows;
     if fw == 0 || fh == 0 {
         return Err(PixelSnapperError::InvalidInput(format!(
             "Frame size too small: {}×{} — try fewer columns/rows",
@@ -959,8 +1510,8 @@ fn split_spritesheet(img: &RgbaImage, cols: u32, rows: u32) -> Result<Vec<RgbaIm
     let mut frames = Vec::with_capacity((cols * rows) as usize);
     for row in 0..rows {
         for col in 0..cols {
-            let x0 = col * fw;
-            let y0 = row * fh;
+            let x0 = off_x + col * fw;
+            let y0 = off_y + row * fh;
             let frame = image::imageops::crop_imm(img, x0, y0, fw, fh).to_image();
             frames.push(frame);
         }
@@ -972,7 +1523,9 @@ fn split_spritesheet(img: &RgbaImage, cols: u32, rows: u32) -> Result<Vec<RgbaIm
 
 fn frames_to_gif(frames: &[RgbaImage], fps: u32, loop_count: u16) -> Result<Vec<u8>> {
     if frames.is_empty() {
-        return Err(PixelSnapperError::InvalidInput("No frames to encode".to_string()));
+        return Err(PixelSnapperError::InvalidInput(
+            "No frames to encode".to_string(),
+        ));
     }
     let fps = fps.max(1).min(50);
     let delay_cs = (100 / fps) as u16; // GIF delay is in centiseconds
@@ -1007,13 +1560,10 @@ fn frames_to_gif(frames: &[RgbaImage], fps: u32, loop_count: u16) -> Result<Vec<
                 .collect();
 
             // Speed 10: good quality/speed balance (1=best, 30=fastest)
-            let mut gif_frame = gif::Frame::from_rgba_speed(
-                w as u16,
-                h as u16,
-                &mut frame_pixels,
-                10,
-            );
+            let mut gif_frame =
+                gif::Frame::from_rgba_speed(w as u16, h as u16, &mut frame_pixels, 10);
             gif_frame.delay = delay_cs;
+            gif_frame.dispose = gif::DisposalMethod::Background;
 
             encoder
                 .write_frame(&gif_frame)
@@ -1034,17 +1584,21 @@ fn read_gif_frames(input_bytes: &[u8]) -> Result<Vec<(RgbaImage, u16)>> {
         .map_err(|e| PixelSnapperError::ProcessingError(format!("GIF decode: {}", e)))?;
     let mut out = Vec::new();
     for frame in decoder.into_frames() {
-        let frame = frame
-            .map_err(|e| PixelSnapperError::ProcessingError(format!("GIF frame: {}", e)))?;
+        let frame =
+            frame.map_err(|e| PixelSnapperError::ProcessingError(format!("GIF frame: {}", e)))?;
         let (num, denom) = frame.delay().numer_denom_ms();
         // delay in centiseconds (GIF unit); avoid divide-by-zero
-        let delay_cs = if denom == 0 { 10u16 } else {
+        let delay_cs = if denom == 0 {
+            10u16
+        } else {
             ((num as f64 / denom as f64) / 10.0).round().max(1.0) as u16
         };
         out.push((frame.into_buffer(), delay_cs));
     }
     if out.is_empty() {
-        return Err(PixelSnapperError::InvalidInput("GIF has no frames".to_string()));
+        return Err(PixelSnapperError::InvalidInput(
+            "GIF has no frames".to_string(),
+        ));
     }
     Ok(out)
 }
@@ -1067,9 +1621,13 @@ fn encode_gif_with_delays(frames: &[RgbaImage], delays: &[u16]) -> Result<Vec<u8
             } else {
                 rgba_frame.clone()
             };
-            let mut pixels: Vec<u8> = resized.pixels().flat_map(|p| [p[0], p[1], p[2], p[3]]).collect();
+            let mut pixels: Vec<u8> = resized
+                .pixels()
+                .flat_map(|p| [p[0], p[1], p[2], p[3]])
+                .collect();
             let mut f = gif::Frame::from_rgba_speed(w as u16, h as u16, &mut pixels, 10);
             f.delay = delays.get(i).copied().unwrap_or(10);
+            f.dispose = gif::DisposalMethod::Background;
             enc.write_frame(&f)
                 .map_err(|e| PixelSnapperError::ProcessingError(e.to_string()))?;
         }
@@ -1082,6 +1640,8 @@ fn snap_gif_internal(
     config: &Config,
     remove_bg: bool,
     bg_tolerance: u8,
+    manual_bg: Option<[u8; 4]>,
+    bg_global: bool,
 ) -> Result<Vec<u8>> {
     let frames_with_delays = read_gif_frames(input_bytes)?;
     let (fw, fh) = frames_with_delays[0].0.dimensions();
@@ -1092,8 +1652,13 @@ fn snap_gif_internal(
 
     for (mut frame, delay) in frames_with_delays {
         if remove_bg {
-            if let Some(bg) = detect_background_color(&frame) {
-                remove_background_flood(&mut frame, bg, bg_tolerance);
+            let bg = manual_bg.or_else(|| detect_background_color(&frame));
+            if let Some(bg) = bg {
+                if bg_global {
+                    remove_background_global(&mut frame, bg, bg_tolerance);
+                } else {
+                    remove_background_flood(&mut frame, bg, bg_tolerance);
+                }
             }
         }
         snapped.push(snap_frame(&frame, config)?);
@@ -1119,7 +1684,9 @@ fn compute_profiles(img: &RgbaImage, _config: &Config) -> Result<(Vec<f64>, Vec<
 
     let lum = |x: u32, y: u32| -> Option<f64> {
         let p = img.get_pixel(x, y);
-        if p[3] < 32 { return None; }
+        if p[3] < 32 {
+            return None;
+        }
         Some(0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64)
     };
 
@@ -1309,8 +1876,7 @@ fn stabilize_cuts(
     let min_req = config.min_cuts_per_axis.max(2).min(limit.saturating_add(1));
     let axis_cells = cuts.len().saturating_sub(1);
     let sib_cells = sibling_cuts.len().saturating_sub(1);
-    let sib_has_grid =
-        sibling_limit > 0 && sib_cells >= min_req.saturating_sub(1) && sib_cells > 0;
+    let sib_has_grid = sibling_limit > 0 && sib_cells >= min_req.saturating_sub(1) && sib_cells > 0;
     let skewed = sib_has_grid && axis_cells > 0 && {
         let ax_step = limit as f64 / axis_cells as f64;
         let sib_step = sibling_limit as f64 / sib_cells as f64;
@@ -1390,8 +1956,7 @@ fn snap_uniform_cuts(
         .min(limit);
 
     let cell_w = limit as f64 / desired as f64;
-    let window =
-        (cell_w * config.walker_search_window_ratio).max(config.walker_min_search_window);
+    let window = (cell_w * config.walker_search_window_ratio).max(config.walker_min_search_window);
     let mean_val = if profile.is_empty() {
         0.0
     } else {
@@ -1474,4 +2039,3 @@ fn resample(img: &RgbaImage, cols: &[usize], rows: &[usize]) -> Result<RgbaImage
     }
     Ok(out)
 }
-

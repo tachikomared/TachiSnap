@@ -1,98 +1,119 @@
-# 🎮 Pixel Snapper
+# TachiSnap
 
-> Snap messy AI-generated pixel art to a perfect grid — in your browser.
+Pixel Snapper for animation pixel artists.
 
-[![Deploy to GitHub Pages](https://github.com/YOUR_USERNAME/pixel-snapper/actions/workflows/deploy.yml/badge.svg)](https://github.com/YOUR_USERNAME/pixel-snapper/actions)
+Made by TachikomaRed and smolemaru.
 
-**[Live Demo →](https://YOUR_USERNAME.github.io/pixel-snapper)**
-
-![Screenshot](static/hero.png)
-
----
+TachiSnap is a free, client-side Rust + WebAssembly tool for cleaning up AI-generated pixel art. Images are processed locally in the browser; they are not uploaded to a server.
 
 ## What it does
 
-Current AI image models can't understand grid-based pixel art:
+AI image models often produce pixel art with uneven blocks, drifting grids, fuzzy colors, or unwanted backgrounds. TachiSnap cleans that up by:
 
-- Pixels are inconsistent in size and position
-- The grid resolution drifts over time
-- Colors aren't tied to a strict palette
+- snapping visual pixels to a uniform grid
+- quantizing colors to a strict palette with k-means++ in CIELAB color space
+- optionally removing backgrounds with flood fill or global color removal
+- upscaling with crisp nearest-neighbor scaling
+- snapping animated GIF frames
+- converting sprite sheets into animated GIFs
+- bulk processing multiple images or a selected/dropped folder
 
-**Pixel Snapper fixes this:**
+Supported input formats: PNG, JPEG, GIF, BMP, and WebP.
 
-- ✅ Pixels snapped to a perfect uniform grid
-- ✅ Colors quantized to a strict palette (k-means++)
-- ✅ Optional nearest-neighbor upscale (1×, 2×, 4×, 8×)
-- ✅ Runs 100% in-browser via WebAssembly
-
----
-
-## Improvements over original
-
-| Feature | Original | This fork |
-|---------|----------|-----------|
-| Forced pixel size | ❌ | ✅ Manual override slider |
-| Upscale output | ❌ | ✅ 1×/2×/4×/8× |
-| Detect pixel size (WASM) | ❌ | ✅ `detect_pixel_size()` |
-| Web UI | ❌ (external) | ✅ Included |
-| GitHub Pages deploy | ❌ | ✅ Auto CI/CD |
-| Image formats | PNG/JPEG | PNG/JPEG/GIF/BMP/WebP |
-
----
+Output formats: PNG for still images, GIF for animated output, and ZIP for bulk downloads.
 
 ## Local development
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/)
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/)
+- Rust
+- wasm-pack
 
 ### Build
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/pixel-snapper
-cd pixel-snapper
 ./build.sh
 python3 -m http.server 8080
-# open http://localhost:8080
 ```
 
-### CLI usage
+Then open `http://localhost:8080`.
+
+The build script compiles the Rust library to WebAssembly and copies the static web files into the project root.
+
+## CLI usage
 
 ```bash
-cargo run --release -- input.png output.png [k_colors] [pixel_size] [upscale]
-
-# Examples:
-cargo run --release -- sprite.png fixed.png          # auto settings
-cargo run --release -- sprite.png fixed.png 16       # 16-color palette
-cargo run --release -- sprite.png fixed.png 16 4     # force 4px pixel size
-cargo run --release -- sprite.png fixed.png 16 4 4   # + 4× upscale
+cargo run --release -- snap input.png output.png --k 16 --pixel-size 4 --upscale 4
+cargo run --release -- animate sheet.png output.gif --cols 4 --rows 2 --fps 12
+cargo run --release -- bulk ./ai-art ./clean-art --recursive --k 16 --upscale 4 --remove-bg --json
 ```
 
----
+Use `--remove-bg`, `--bg-tolerance`, `--bg-mode flood|global`, and `--bg-color "#RRGGBB"` for background removal.
 
-## Deploy to GitHub Pages
+## Agentic native usage
 
-1. Fork / push to GitHub
-2. Go to **Settings → Pages → Source**: set to **GitHub Actions**
-3. Push to `main` — the CI workflow builds WASM and deploys automatically
+TachiSnap includes a folder-oriented CLI command for Codex, Claude Code, and other local coding agents:
 
----
+```bash
+tachi-snap bulk ./input-ai-pixel-art ./output-clean \
+  --recursive \
+  --k 16 \
+  --pixel-size 0 \
+  --upscale 4 \
+  --remove-bg \
+  --bg-mode flood \
+  --json
+```
+
+The command:
+
+- scans PNG, JPEG, GIF, BMP, and WebP files
+- preserves nested folder structure in the output folder
+- writes still images as PNG and animated GIFs as GIF
+- suffixes outputs with `_tachisnap`
+- prints a machine-readable JSON report with per-file status, output paths, sizes, and errors
+
+Example agent prompt:
+
+```text
+Use TachiSnap to clean every AI-generated pixel art file in ./raw-art and put the results in ./clean-art. Use recursive mode and return the JSON summary.
+```
+
+## Deployment
+
+This is a static app after build. Host the generated HTML, JavaScript, and WASM files on any static host, including GitHub Pages or Vercel.
+
+For GitHub Pages, the included workflow builds WASM and publishes the static artifact on pushes to `main`.
+
+For GitHub Releases, push a version tag:
+
+```bash
+git tag v0.3.1
+git push origin v0.3.1
+```
+
+The release workflow publishes:
+
+- a static web app archive
+- native `tachi-snap` CLI ZIPs for Linux, Windows, and macOS
+
+For Vercel, use a build command equivalent to:
+
+```bash
+wasm-pack build --target web --out-dir pkg --release && mkdir -p dist && cp -r web/* dist/ && cp -r pkg dist/pkg
+```
+
+Set the output directory to `dist`.
 
 ## Algorithm
 
-1. **Color quantization** — k-means++ reduces image to `k` colors
-2. **Gradient profiles** — horizontal/vertical Sobel edge sums detect grid lines
-3. **Peak estimation** — median peak distance gives pixel size
-4. **Grid walker** — elastic walker snaps cuts to strongest edges
-5. **Stabilization** — two-pass cross-axis validation fixes skewed grids
-6. **Resample** — majority-vote per cell produces clean output
-7. **Upscale** — optional nearest-neighbor scaling
-
----
+1. Color quantization reduces the image to a fixed palette.
+2. Gradient profiles estimate the pixel grid.
+3. A grid walker snaps cuts to strong edges.
+4. Stabilization smooths inconsistent rows and columns.
+5. Majority-vote resampling produces clean pixel cells.
+6. Optional nearest-neighbor scaling enlarges the result without blur.
 
 ## Credits
 
-Forked from [Hugo-Dz/spritefusion-pixel-snapper](https://github.com/Hugo-Dz/spritefusion-pixel-snapper) — MIT License.
-
-Original project by [Hugo Duprez](https://www.hugoduprez.com/) / [Sprite Fusion](https://spritefusion.com).
+Forked from [Hugo-Dz/spritefusion-pixel-snapper](https://github.com/Hugo-Dz/spritefusion-pixel-snapper), MIT License.
